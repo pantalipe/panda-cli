@@ -4,76 +4,110 @@ Single entry point for the PandaPoints ecosystem. One command starts the full
 local dev stack — Hardhat node, contract deploy, trade simulator, price poller,
 and the Next.js dapp — in the correct order, each in its own console window.
 
+## Installation
+
+Clone this repo **directly inside your ecosystem root** — the same folder that
+contains `pp-testenv`, `pandapoints-dapp`, `rotman`, etc.:
+
+```
+ecosystem-root/
+  panda-cli/        <- this repo
+  pp-testenv/
+  pandapoints-dapp/
+  rotman/
+  conduler/
+  gitmanager/
+  ollama-bench/
+```
+
+`panda.py` derives all project paths from its own location (`__file__`), so it
+works on any machine, any username, and any drive letter — no configuration
+needed.
+
+Node.js binaries (`npx`, `npm`, `yarn`) are resolved from PATH first, then fall
+back to the Windows default install location (`C:\Program Files\nodejs`).
+
 ## Usage
 
-```
-python panda.py <command> [args]
-```
-
-### Full dev stack
-
 ```bash
-python panda.py dev          # start everything, Ctrl+C to stop all
-python panda.py stop         # kill all tracked services from another terminal
-python panda.py status       # table of running PIDs
+python panda-cli/panda.py <command> [args]
 ```
 
-`dev` startup order:
-
-1. Hardhat node (polls until RPC is ready)
-2. `scramble_health.py` — deploy + seed contract (blocking)
-3. `trade_sim.py` — fuzzy buy/sell transactions
-4. `price_poller.py --local` — continuous price history
-5. `yarn dev` — Next.js dapp on port 3000
-
-### Individual services
-
-```bash
-# testenv
-python panda.py testenv start     # hardhat node + deploy + seed
-python panda.py testenv sim       # trade_sim.py only
-python panda.py testenv reset     # stop everything, fresh redeploy
-
-# dapp
-python panda.py dapp dev          # yarn dev (port 3000)
-python panda.py dapp poller       # price_poller.py --local
-python panda.py dapp backfill     # backfill.py --local (blocking)
-
-# content pipeline
-python panda.py rotman server                         # rotman web UI
-python panda.py rotman generate bitcoinfacil "topic"  # run pipeline
-python panda.py rotman queue                          # show topic queue
-
-# tooling
-python panda.py bench run         # ollama-bench (blocking)
-python panda.py gitmanager        # gitmanager server (port 8000)
-python panda.py conduler          # conduler server (port 7071)
-```
-
-## Convenience wrapper
-
-A `panda.bat` file at `workspace_root<\` lets you run `panda <command>` from
-any terminal opened in that directory:
+Or drop the `panda.bat` wrapper at the ecosystem root for a shorter form:
 
 ```bat
 @echo off
 python "%~dp0panda-cli\panda.py" %*
 ```
 
+Then just run `panda <command>` from the ecosystem root.
+
+## Commands
+
+### Full dev stack
+
+```bash
+panda dev          # start everything — Ctrl+C stops all services cleanly
+panda stop         # kill all tracked services from another terminal
+panda status       # table of running services and PIDs
+```
+
+`dev` startup order:
+
+1. **Hardhat node** — polls until RPC responds before continuing
+2. **`scramble_health.py`** — deploy + seed contract (blocking)
+3. **`trade_sim.py`** — fuzzy buy/sell transactions
+4. **`price_poller.py --local`** — continuous price history
+5. **`yarn dev`** — Next.js dapp on port 3000
+
+### Individual services
+
+```bash
+# testenv (pp-testenv)
+panda testenv start     # hardhat node + deploy + seed
+panda testenv sim       # trade_sim.py only
+panda testenv reset     # stop everything, fresh redeploy
+
+# dapp (pandapoints-dapp)
+panda dapp dev          # yarn dev (port 3000)
+panda dapp poller       # price_poller.py --local
+panda dapp backfill     # backfill.py --local (blocking)
+
+# content pipeline
+panda rotman server                         # rotman web UI
+panda rotman generate bitcoinfacil "topic"  # run pipeline (blocking)
+panda rotman queue                          # show topic queue (blocking)
+
+# tooling
+panda bench run         # ollama-bench (blocking)
+panda gitmanager        # gitmanager server (port 8000)
+panda conduler          # conduler server (port 7071)
+```
+
 ## PID tracking
 
-Running services are tracked in `workspace_root<\.panda\pids.json`.
-`panda stop` reads that file and kills everything. Safe to delete manually
-if it gets out of sync.
+Running services are tracked in `<ecosystem-root>/.panda/pids.json`.
+`panda stop` reads that file and kills everything cleanly. Safe to delete
+manually if it gets out of sync.
 
-## Adding new services
+## Adding a new service
 
-Each service is a ~5-line function in `panda.py`:
+Each service is a small function in `panda.py`. Add an entry to the `P` dict
+at the top, write a `cmd_*` function, and wire it into `main()`:
 
 ```python
+# 1. Add to P dict
+P = {
+    ...
+    "myservice": ROOT / "myservice",
+}
+
+# 2. Write the command function
 def cmd_myservice():
     _log("Starting myservice...")
     return _launch("myservice", [sys.executable, "main.py"], P["myservice"])
-```
 
-Then add an entry to the `P` dict, wire it into `main()`, and it's done.
+# 3. Wire into main()
+elif cmd == "myservice":
+    cmd_myservice()
+```
