@@ -1,0 +1,494 @@
+#!/usr/bin/env python3
+"""
+panda.py - PandaPoints Ecosystem Launcher
+
+Single entry point for the entire PandaPoints dev ecosystem.
+Starts, stops, and monitors all services from one place.
+
+Usage
+-----
+    python panda.py dev                              # full local dev stack
+    python panda.py testenv start                    # hardhat node + deploy/seed
+    python panda.py testenv sim                      # trade simulator
+    python panda.py testenv reset                    # stop all, fresh redeploy
+    python panda.py dapp dev                         # yarn dev (Next.js)
+    python panda.py dapp poller                      # price_poller.py --local
+    python panda.py dapp backfill                    # backfill.py --local
+    python panda.py rotman server                    # rotman web UI
+    python panda.py rotman generate <channel> [topic]
+    python panda.py rotman queue                     # show topic queue
+    python panda.py bench run                        # ollama-bench
+    python panda.py gitmanager                       # gitmanager server
+    python panda.py conduler                         # conduler server
+    python panda.py status                           # show running services
+    python panda.py stop                             # stop all tracked services
+    python panda.py -h | --help
+"""
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+# == Paths =====================================================================
+
+ROOT = Path(r"workspace_root<")
+
+P = {
+    "testenv":    ROOT / "pp-testenv",
+    "dapp":       ROOT / "pandapoints-dapp",
+    "rotman":     ROOT / "rotman",
+    "bench":      ROOT / "ollama-bench",
+    "gitmanager": ROOT / "gitmanager",
+    "conduler":   ROOT / "conduler",
+}
+
+# Node.js tooling
+_NODE_BIN = Path(r"C:\Program Files\nodejs")
+NPM  = str(_NODE_BIN / "npm.cmd")
+NPX  = str(_NODE_BIN / "npx.cmd")
+YARN = str(_NODE_BIN / "yarn.cmd")  # may not exist; _yarn() handles fallback
+
+# State dir (tracks PIDs across commands)
+PANDA_DIR = ROOT / ".panda"
+PIDS_FILE = PANDA_DIR / "pids.json"
+
+# Ports
+HARDHAT_PORT    = 8545
+DAPP_PORT       = 3000
+GITMANAGER_PORT = 8000
+CONDULER_PORT   = 7071
+
+
+# == Python resolver ===========================================================
+
+def _py(project_key: str) -> str:
+    """
+    Return the Python executable for a project.
+    Prefers the project's own venv if present, falls back to the
+    interpreter running this script.
+    """
+    venv_py = P[project_key] / "venv" / "Scripts" / "python.exe"
+    if venv_py.exists():
+        return str(venv_py)
+    return sys.executable
+
+
+def _yarn() -> list:
+    """Return a working yarn invocation for this machine."""
+    if Path(YARN).exists():
+        return [YARN]
+    user_yarn = Path(os.environ.get("APPDATA", "")) / "npm" / "yarn.cmd"
+    if user_yarn.exists():
+        return [str(user_yarn)]
+    # last resort: npx yarn (slower but always works)
+    return [NPX, "yarn"]
+
+
+# == PID tracking ==============================================================
+
+def _pids_load() -> dict:
+    try:
+        return json.loads(PIDS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _pids_save(pids: dict):
+    PANDA_DIR.mkdir(parents=True, exist_ok=True)
+    PIDS_FILE.write_text(json.dumps(pids, indent=2), encoding="utf-8")
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _register(name: str, proc: "subprocess.Popen[bytes]", label: str):
+    pids = _pids_load()
+    pids[name] = {
+        "pid":     proc.pid,
+        "cmd":     label,
+        "started": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    _pids_save(pids)
+
+
+def _kill(pid: int, name: str):
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            os.kill(pid, signal.SIGTERM)
+        _log(f"stopped {name} (PID {pid})")
+    except Exception as exc:
+        _log(f"could not stop {name} (PID {pid}): {exc}")
+
+
+# == Logging ===================================================================
+
+def _log(msg: str, prefix: str = "panda"):
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] [{prefix}] {msg}", flush=True)
+
+
+# == Process launchers =========================================================
+
+def _launch(name: str, cmd: list, cwd: Path) -> "subprocess.Popen[bytes]":
+    """
+    Launch a long-running background service in a new console window
+    (Windows) so its logs remain visible. Tracks the PID in pids.json.
+    """
+    kwargs: dict = {"cwd": str(cwd)}
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
+    else:
+        kwargs["stdout"] = subprocess.DEVNULL
+        kwargs["stderr"] = subprocess.DEVNULL
+
+    proc = subprocess.Popen(cmd, **kwargs)
+    label = " ".join(str(c) for c in cmd)
+    _register(name, proc, label)
+    _log(f"{name} started (PID {proc.pid})")
+    return proc
+
+
+def _run(cmd: list, cwd: Path, label: str):
+    """Run a command synchronously; raise RuntimeError on non-zero exit."""
+    _log(f"running: {label}")
+    result = subprocess.run(cmd, cwd=str(cwd))
+    if result.returncode != 0:
+        raise RuntimeError(f"'{label}' failed (exit {result.returncode})")
+
+
+# == Wait helpers ==============================================================
+
+def _wait_rpc(port: int, timeout: int = 45, label: str = "RPC") -> bool:
+    """Poll an ETH JSON-RPC endpoint until it responds or timeout."""
+    url  = f"http://127.0.0.1:{port}"
+    body = json.dumps({
+        "jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1
+    }).encode()
+    deadline = time.time() + timeout
+    sys.stdout.write(f"    waiting for {label}")
+    sys.stdout.flush()
+    while time.time() < deadline:
+        try:
+            req = urllib.request.Request(
+                url, data=body, headers={"Content-Type": "application/json"}
+            )
+            urllib.request.urlopen(req, timeout=2)
+            sys.stdout.write(" ready\n")
+            sys.stdout.flush()
+            return True
+        except Exception:
+            sys.stdout.write(".")
+            sys.stdout.flush()
+            time.sleep(1)
+    sys.stdout.write(" TIMEOUT\n")
+    return False
+
+
+# == Commands ==================================================================
+
+def cmd_testenv_start():
+    """Start Hardhat node then deploy + seed the contract."""
+    _log("Starting Hardhat node...")
+    proc_hh = _launch(
+        "hardhat",
+        [NPX, "hardhat", "node"],
+        P["testenv"],
+    )
+    if not _wait_rpc(HARDHAT_PORT, timeout=45, label="Hardhat"):
+        raise RuntimeError("Hardhat node did not respond in time.")
+
+    _log("Deploying and seeding contract (scramble_health.py)...")
+    _run(
+        [_py("testenv"), "scramble_health.py"],
+        P["testenv"],
+        "scramble_health.py",
+    )
+    _log("Contract deployed and seeded.")
+    return proc_hh
+
+
+def cmd_testenv_sim():
+    """Start trade_sim.py in a background window."""
+    _log("Starting trade simulator...")
+    return _launch(
+        "trade_sim",
+        [_py("testenv"), "trade_sim.py"],
+        P["testenv"],
+    )
+
+
+def cmd_testenv_reset():
+    """Kill all running services and do a fresh deploy + seed."""
+    _log("Resetting dev environment...")
+    pids = _pids_load()
+    for name in ("hardhat", "trade_sim", "price_poller", "dapp"):
+        info = pids.get(name)
+        if info and _pid_alive(info["pid"]):
+            _kill(info["pid"], name)
+    _pids_save({})
+    time.sleep(2)
+    cmd_testenv_start()
+
+
+def cmd_dapp_dev():
+    """Start the Next.js dapp with yarn dev."""
+    _log("Starting Next.js dapp...")
+    return _launch("dapp", _yarn() + ["dev"], P["dapp"])
+
+
+def cmd_dapp_poller():
+    """Start price_poller.py targeting the local Hardhat node."""
+    _log("Starting price poller (local)...")
+    return _launch(
+        "price_poller",
+        [sys.executable, "scripts/price_poller.py", "--local"],
+        P["dapp"],
+    )
+
+
+def cmd_dapp_backfill():
+    """Run backfill.py against the local Hardhat node (blocking)."""
+    _log("Running backfill (local)...")
+    _run(
+        [sys.executable, "scripts/backfill.py", "--local"],
+        P["dapp"],
+        "backfill.py --local",
+    )
+
+
+def cmd_rotman_server():
+    """Start the rotman web UI server."""
+    _log("Starting rotman server...")
+    return _launch("rotman", [_py("rotman"), "server.py"], P["rotman"])
+
+
+def cmd_rotman_generate(channel, topic):
+    """Run the rotman pipeline for a channel (blocking)."""
+    if not channel:
+        print("usage: panda rotman generate <channel> [topic]")
+        sys.exit(1)
+    cmd = [_py("rotman"), "pipeline.py", channel]
+    if topic:
+        cmd += ["--topic", topic]
+    _run(cmd, P["rotman"], f"rotman pipeline {channel}")
+
+
+def cmd_rotman_queue():
+    """Show the rotman topic queue (blocking)."""
+    _run([_py("rotman"), "topic_queue.py", "--list"], P["rotman"], "rotman queue")
+
+
+def cmd_bench_run():
+    """Run ollama-bench (blocking)."""
+    _run([sys.executable, "bench.py"], P["bench"], "ollama-bench")
+
+
+def cmd_gitmanager():
+    """Start the gitmanager server."""
+    _log("Starting gitmanager server...")
+    return _launch("gitmanager", [sys.executable, "server.py"], P["gitmanager"])
+
+
+def cmd_conduler():
+    """Start the conduler server."""
+    _log("Starting conduler server...")
+    return _launch("conduler", [sys.executable, "main.py"], P["conduler"])
+
+
+def cmd_status():
+    """Print a status table of all tracked services."""
+    pids = _pids_load()
+    if not pids:
+        print("\n  No services currently tracked.\n")
+        return
+
+    print()
+    print(f"  {'SERVICE':<16} {'PID':<8} {'STATUS':<10} {'STARTED (UTC)':<22} COMMAND")
+    print(f"  {'-'*16} {'-'*8} {'-'*10} {'-'*22} {'-'*30}")
+    for name, info in sorted(pids.items()):
+        pid     = info.get("pid", 0)
+        alive   = _pid_alive(pid)
+        status  = "running" if alive else "stopped"
+        started = info.get("started", "?")[:19].replace("T", " ")
+        label   = info.get("cmd", "?")[:38]
+        marker  = "+" if alive else "-"
+        print(f"  [{marker}] {name:<14} {pid:<8} {status:<10} {started:<22} {label}")
+    print()
+
+
+def cmd_stop():
+    """Stop all services tracked in pids.json."""
+    pids = _pids_load()
+    if not pids:
+        _log("Nothing running.")
+        return
+    for name, info in pids.items():
+        pid = info.get("pid", 0)
+        if _pid_alive(pid):
+            _kill(pid, name)
+    _pids_save({})
+    _log("All services stopped.")
+
+
+def cmd_dev():
+    """
+    Full local dev stack in the correct startup order.
+    Blocks until Ctrl+C, then tears everything down cleanly.
+    """
+    print()
+    print("  +--------------------------------------------+")
+    print("  |   PandaPoints - Full Dev Stack             |")
+    print("  +--------------------------------------------+")
+    print()
+
+    _log("[1/4] Starting Hardhat node + deploying contract...")
+    cmd_testenv_start()
+
+    _log("[2/4] Starting trade simulator...")
+    cmd_testenv_sim()
+
+    _log("[3/4] Starting price poller (local)...")
+    cmd_dapp_poller()
+
+    _log("[4/4] Starting Next.js dapp...")
+    cmd_dapp_dev()
+
+    print()
+    print("  +--------------------------------------------+")
+    print(f"  |  Dapp         ->  http://localhost:{DAPP_PORT}      |")
+    print(f"  |  Hardhat RPC  ->  http://127.0.0.1:{HARDHAT_PORT}   |")
+    print("  |                                            |")
+    print("  |  Ctrl+C  ->  stop all services            |")
+    print("  +--------------------------------------------+")
+    print()
+
+    try:
+        while True:
+            time.sleep(5)
+    except KeyboardInterrupt:
+        print()
+        _log("Shutting down...")
+        cmd_stop()
+
+
+# == Help ======================================================================
+
+HELP = """\
+panda.py - PandaPoints Ecosystem Launcher
+
+usage: python panda.py <command> [args]
+
+commands:
+  dev                                   full local dev stack + Ctrl+C teardown
+
+  testenv start                         hardhat node + deploy + seed contract
+  testenv sim                           start trade_sim.py
+  testenv reset                         stop all, fresh redeploy
+
+  dapp dev                              yarn dev  (Next.js, port 3000)
+  dapp poller                           price_poller.py --local
+  dapp backfill                         backfill.py --local  (blocking)
+
+  rotman server                         rotman web UI
+  rotman generate <channel> [topic]     run pipeline.py  (blocking)
+  rotman queue                          show topic queue  (blocking)
+
+  bench run                             ollama-bench  (blocking)
+
+  gitmanager                            gitmanager server  (port 8000)
+  conduler                              conduler server    (port 7071)
+
+  status                                table of tracked services + PIDs
+  stop                                  kill all tracked services
+
+  -h, --help                            show this message
+"""
+
+
+# == Dispatch ==================================================================
+
+def _unknown_sub(cmd: str, sub: str):
+    print(f"unknown sub-command: '{cmd} {sub}'")
+    print("Run 'python panda.py --help' for usage.")
+    sys.exit(1)
+
+
+def main():
+    argv = sys.argv[1:]
+
+    if not argv or argv[0] in ("-h", "--help"):
+        print(HELP)
+        return
+
+    cmd = argv[0]
+
+    try:
+        if cmd == "dev":
+            cmd_dev()
+
+        elif cmd == "testenv":
+            sub = argv[1] if len(argv) > 1 else ""
+            if   sub == "start": cmd_testenv_start()
+            elif sub == "sim":   cmd_testenv_sim()
+            elif sub == "reset": cmd_testenv_reset()
+            else: _unknown_sub(cmd, sub)
+
+        elif cmd == "dapp":
+            sub = argv[1] if len(argv) > 1 else ""
+            if   sub == "dev":      cmd_dapp_dev()
+            elif sub == "poller":   cmd_dapp_poller()
+            elif sub == "backfill": cmd_dapp_backfill()
+            else: _unknown_sub(cmd, sub)
+
+        elif cmd == "rotman":
+            sub = argv[1] if len(argv) > 1 else ""
+            if   sub == "server":   cmd_rotman_server()
+            elif sub == "generate":
+                cmd_rotman_generate(
+                    argv[2] if len(argv) > 2 else None,
+                    argv[3] if len(argv) > 3 else None,
+                )
+            elif sub == "queue": cmd_rotman_queue()
+            else: _unknown_sub(cmd, sub)
+
+        elif cmd == "bench":
+            sub = argv[1] if len(argv) > 1 else ""
+            if sub == "run": cmd_bench_run()
+            else: _unknown_sub(cmd, sub)
+
+        elif cmd == "gitmanager": cmd_gitmanager()
+        elif cmd == "conduler":   cmd_conduler()
+        elif cmd == "status":     cmd_status()
+        elif cmd == "stop":       cmd_stop()
+        else:
+            print(f"unknown command: {cmd!r}")
+            print("Run 'python panda.py --help' for usage.")
+            sys.exit(1)
+
+    except KeyboardInterrupt:
+        print()
+        _log("Interrupted.")
+    except RuntimeError as exc:
+        _log(f"ERROR: {exc}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
