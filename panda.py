@@ -126,6 +126,10 @@ def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        # Process exists but is in a different session (e.g. CREATE_NEW_CONSOLE).
+        # PermissionError means alive, not dead.
+        return True
     except OSError:
         return False
 
@@ -143,8 +147,10 @@ def _register(name: str, proc: "subprocess.Popen[bytes]", label: str):
 def _kill(pid: int, name: str):
     try:
         if sys.platform == "win32":
+            # /F  force-terminates
+            # /T  kills the entire process tree (children included)
             subprocess.run(
-                ["taskkill", "/F", "/PID", str(pid)],
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -359,8 +365,9 @@ def cmd_stop():
         return
     for name, info in pids.items():
         pid = info.get("pid", 0)
-        if _pid_alive(pid):
-            _kill(pid, name)
+        # Always attempt the kill — _pid_alive can misread cross-session
+        # processes on Windows, so we don't gate on it here.
+        _kill(pid, name)
     _pids_save({})
     _log("All services stopped.")
 
