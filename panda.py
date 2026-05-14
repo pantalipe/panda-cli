@@ -37,7 +37,10 @@ from pathlib import Path
 
 # == Paths =====================================================================
 
-ROOT = Path(r"workspace_root<")
+# Root is the directory that contains panda-cli/ — i.e. the ecosystem root.
+# Works regardless of username or install location as long as panda-cli/
+# sits directly inside the ecosystem root alongside all other projects.
+ROOT = Path(__file__).resolve().parent.parent
 
 P = {
     "testenv":    ROOT / "pp-testenv",
@@ -48,11 +51,24 @@ P = {
     "conduler":   ROOT / "conduler",
 }
 
-# Node.js tooling
-_NODE_BIN = Path(r"C:\Program Files\nodejs")
-NPM  = str(_NODE_BIN / "npm.cmd")
-NPX  = str(_NODE_BIN / "npx.cmd")
-YARN = str(_NODE_BIN / "yarn.cmd")  # may not exist; _yarn() handles fallback
+# Node.js tooling — auto-detect from PATH, fall back to default install location.
+import shutil as _shutil
+
+def _find_node_bin(name: str) -> str:
+    """Resolve a Node.js binary: PATH first, then Program Files fallback."""
+    found = _shutil.which(name)
+    if found:
+        return found
+    # Windows default install location
+    fallback = Path(r"C:\Program Files\nodejs") / (name + ".cmd")
+    if fallback.exists():
+        return str(fallback)
+    # Last resort — let the OS raise a useful error at call time
+    return name
+
+NPM  = _find_node_bin("npm")
+NPX  = _find_node_bin("npx")
+YARN = _find_node_bin("yarn")  # may not exist; _yarn() handles fallback
 
 # State dir (tracks PIDs across commands)
 PANDA_DIR = ROOT / ".panda"
@@ -81,12 +97,14 @@ def _py(project_key: str) -> str:
 
 def _yarn() -> list:
     """Return a working yarn invocation for this machine."""
+    # If _find_node_bin resolved a real path, use it directly
     if Path(YARN).exists():
         return [YARN]
+    # yarn installed globally via npm (common on Windows)
     user_yarn = Path(os.environ.get("APPDATA", "")) / "npm" / "yarn.cmd"
     if user_yarn.exists():
         return [str(user_yarn)]
-    # last resort: npx yarn (slower but always works)
+    # last resort: npx yarn (slower but always works if npx is available)
     return [NPX, "yarn"]
 
 
