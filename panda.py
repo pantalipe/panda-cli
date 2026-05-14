@@ -123,15 +123,22 @@ def _pids_save(pids: dict):
 
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except PermissionError:
-        # Process exists but is in a different session (e.g. CREATE_NEW_CONSOLE).
-        # PermissionError means alive, not dead.
-        return True
-    except OSError:
-        return False
+    if sys.platform == "win32":
+        # os.kill(pid, 0) is unreliable across console sessions on Windows.
+        # tasklist is the authoritative way to check process existence.
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True, text=True,
+        )
+        return str(pid) in result.stdout
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True  # exists but different session
+        except OSError:
+            return False
 
 
 def _register(name: str, proc: "subprocess.Popen[bytes]", label: str):
@@ -336,6 +343,20 @@ def cmd_conduler():
     return _launch("conduler", [sys.executable, "main.py"], P["conduler"])
 
 
+def _short_cmd(cmd: str) -> str:
+    """
+    Strip the Python interpreter prefix from a stored command string so the
+    status table shows just the script + args rather than the full exe path.
+    e.g. 'C:\\...\\python.exe server.py' -> 'server.py'
+    """
+    parts = cmd.split()
+    # Drop leading token(s) that look like a Python executable
+    while parts and (parts[0].lower().endswith(("python.exe", "python", "python3"))):
+        parts = parts[1:]
+    result = " ".join(parts)
+    return result[:42] if result else cmd[:42]
+
+
 def cmd_status():
     """Print a status table of all tracked services."""
     pids = _pids_load()
@@ -345,13 +366,13 @@ def cmd_status():
 
     print()
     print(f"  {'SERVICE':<16} {'PID':<8} {'STATUS':<10} {'STARTED (UTC)':<22} COMMAND")
-    print(f"  {'-'*16} {'-'*8} {'-'*10} {'-'*22} {'-'*30}")
+    print(f"  {'-'*16} {'-'*8} {'-'*10} {'-'*22} {'-'*42}")
     for name, info in sorted(pids.items()):
         pid     = info.get("pid", 0)
         alive   = _pid_alive(pid)
         status  = "running" if alive else "stopped"
         started = info.get("started", "?")[:19].replace("T", " ")
-        label   = info.get("cmd", "?")[:38]
+        label   = _short_cmd(info.get("cmd", "?"))
         marker  = "+" if alive else "-"
         print(f"  [{marker}] {name:<14} {pid:<8} {status:<10} {started:<22} {label}")
     print()
