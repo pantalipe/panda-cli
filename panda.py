@@ -20,6 +20,9 @@ Usage
     python panda.py bench run                        # ollama-bench
     python panda.py gitmanager                       # gitmanager server
     python panda.py conduler                         # conduler server
+    python panda.py llm start                        # start llama-swap on :8080
+    python panda.py llm stop                         # stop llama-swap
+    python panda.py llm status                       # check LLM health + loaded models
     python panda.py status                           # show running services
     python panda.py stop                             # stop all tracked services
     python panda.py -h | --help
@@ -31,6 +34,7 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import webbrowser
 from datetime import datetime, timezone
@@ -81,6 +85,12 @@ DAPP_PORT       = 3000
 GITMANAGER_PORT = 8765
 CONDULER_PORT   = 7071
 ROTMAN_PORT     = 7070
+LLAMA_SWAP_PORT = 8080
+
+# llama-swap paths
+# Override LLAMA_SWAP_EXE_DEFAULT by setting the LLAMA_SWAP_EXE env var.
+LLAMA_SWAP_EXE_DEFAULT = Path(r"C:\llama.cpp\llama-swap.exe")
+LLAMA_SWAP_CONFIG      = Path(r"C:\llama.cpp\config.yaml")
 
 
 # == Python resolver ===========================================================
@@ -388,6 +398,89 @@ def cmd_conduler():
     return proc
 
 
+# == LLM (llama-swap) =========================================================
+
+def _find_llama_swap_exe() -> str | None:
+    """
+    Locate the llama-swap binary.
+    Priority:
+      1. LLAMA_SWAP_EXE environment variable
+      2. LLAMA_SWAP_EXE_DEFAULT  (C:\\llama.cpp\\llama-swap.exe)
+      3. shutil.which('llama-swap')  — system PATH
+    Returns None if not found anywhere.
+    """
+    env_override = os.environ.get("LLAMA_SWAP_EXE")
+    if env_override and Path(env_override).exists():
+        return env_override
+    if LLAMA_SWAP_EXE_DEFAULT.exists():
+        return str(LLAMA_SWAP_EXE_DEFAULT)
+    found = _shutil.which("llama-swap")
+    if found:
+        return found
+    return None
+
+
+def cmd_llm_start():
+    """Start llama-swap on port 8080 and wait until it is ready."""
+    # Guard: already running?
+    pids = _pids_load()
+    info = pids.get("llama-swap")
+    if info and _pid_alive(info["pid"]):
+        _log(f"llama-swap already running (PID {info['pid']})")
+        return
+
+    exe = _find_llama_swap_exe()
+    if not exe:
+        raise RuntimeError(
+            f"llama-swap binary not found.\n"
+            f"  Expected : {LLAMA_SWAP_EXE_DEFAULT}\n"
+            f"  Override : set the LLAMA_SWAP_EXE environment variable."
+        )
+    if not LLAMA_SWAP_CONFIG.exists():
+        raise RuntimeError(f"llama-swap config not found: {LLAMA_SWAP_CONFIG}")
+
+    _log(f"Starting llama-swap  ({exe})...")
+    proc = _launch(
+        "llama-swap",
+        [exe, "--config", str(LLAMA_SWAP_CONFIG), "--listen", f"0.0.0.0:{LLAMA_SWAP_PORT}"],
+        LLAMA_SWAP_EXE_DEFAULT.parent,
+    )
+    _wait_http(LLAMA_SWAP_PORT, path="/v1/models", timeout=30, label="llama-swap")
+    return proc
+
+
+def cmd_llm_stop():
+    """Stop the llama-swap process tracked in pids.json."""
+    pids = _pids_load()
+    info = pids.get("llama-swap")
+    if not info:
+        _log("llama-swap is not tracked (not started via panda-cli).")
+        return
+    _kill(info["pid"], "llama-swap")
+    del pids["llama-swap"]
+    _pids_save(pids)
+
+
+def cmd_llm_status():
+    """Check llama-swap health and print the models currently available."""
+    url = f"http://127.0.0.1:{LLAMA_SWAP_PORT}/v1/models"
+    try:
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            data   = json.loads(resp.read().decode("utf-8"))
+            models = [m["id"] for m in data.get("data", [])]
+            print(f"\n  llama-swap  :  online  (:{LLAMA_SWAP_PORT})")
+            if models:
+                for m in models:
+                    print(f"    - {m}")
+            else:
+                print("    (no models currently loaded)")
+    except Exception as exc:
+        print(f"\n  llama-swap  :  OFFLINE  (:{LLAMA_SWAP_PORT})")
+        print(f"  error  : {exc}")
+        print(f"  start  : python panda.py llm start")
+    print()
+
+
 def _short_cmd(cmd: str) -> str:
     """
     Strip the Python interpreter prefix from a stored command string so the
@@ -449,22 +542,30 @@ def cmd_dev():
     print("  +--------------------------------------------+")
     print()
 
-    _log("[1/4] Starting Hardhat node + deploying contract...")
+    _log("[1/5] Starting llama-swap (LLM server)...")
+    try:
+        cmd_llm_start()
+    except RuntimeError as e:
+        _log(f"WARNING: LLM server not started — {e}")
+        _log("         Run 'python panda.py llm start' separately when ready.")
+
+    _log("[2/5] Starting Hardhat node + deploying contract...")
     cmd_testenv_start()
 
-    _log("[2/4] Starting trade simulator...")
+    _log("[3/5] Starting trade simulator...")
     cmd_testenv_sim()
 
-    _log("[3/4] Starting price poller (local)...")
+    _log("[4/5] Starting price poller (local)...")
     cmd_dapp_poller()
 
-    _log("[4/4] Starting Next.js dapp...")
+    _log("[5/5] Starting Next.js dapp...")
     cmd_dapp_dev()
 
     print()
     print("  +--------------------------------------------+")
     print(f"  |  Dapp         ->  http://localhost:{DAPP_PORT}      |")
     print(f"  |  Hardhat RPC  ->  http://127.0.0.1:{HARDHAT_PORT}   |")
+    print(f"  |  LLM          ->  http://127.0.0.1:{LLAMA_SWAP_PORT}   |")
     print("  |                                            |")
     print("  |  Ctrl+C  ->  stop all services            |")
     print("  +--------------------------------------------+")
@@ -503,8 +604,12 @@ commands:
 
   bench run                             ollama-bench  (blocking)
 
-  gitmanager                            gitmanager server  (port 8000)
+  gitmanager                            gitmanager server  (port 8765)
   conduler                              conduler server    (port 7071)
+
+  llm start                             start llama-swap on :8080
+  llm stop                              stop llama-swap
+  llm status                            check LLM health + list loaded models
 
   status                                table of tracked services + PIDs
   stop                                  kill all tracked services
@@ -566,6 +671,12 @@ def main():
 
         elif cmd == "gitmanager": cmd_gitmanager()
         elif cmd == "conduler":   cmd_conduler()
+        elif cmd == "llm":
+            sub = argv[1] if len(argv) > 1 else ""
+            if   sub == "start":  cmd_llm_start()
+            elif sub == "stop":   cmd_llm_stop()
+            elif sub == "status": cmd_llm_status()
+            else: _unknown_sub(cmd, sub)
         elif cmd == "status":     cmd_status()
         elif cmd == "stop":       cmd_stop()
         else:
