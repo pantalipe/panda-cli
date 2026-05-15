@@ -32,6 +32,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -77,8 +78,9 @@ PIDS_FILE = PANDA_DIR / "pids.json"
 # Ports
 HARDHAT_PORT    = 8545
 DAPP_PORT       = 3000
-GITMANAGER_PORT = 8000
+GITMANAGER_PORT = 8765
 CONDULER_PORT   = 7071
+ROTMAN_PORT     = 7070
 
 
 # == Python resolver ===========================================================
@@ -232,6 +234,37 @@ def _wait_rpc(port: int, timeout: int = 45, label: str = "RPC") -> bool:
     return False
 
 
+def _wait_http(port: int, path: str = "/", timeout: int = 30, label: str = "HTTP") -> bool:
+    """Poll a plain HTTP endpoint until it responds with any status or timeout."""
+    url = f"http://127.0.0.1:{port}{path}"
+    deadline = time.time() + timeout
+    sys.stdout.write(f"    waiting for {label}")
+    sys.stdout.flush()
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(url, timeout=2)
+            sys.stdout.write(" ready\n")
+            sys.stdout.flush()
+            return True
+        except urllib.error.HTTPError:
+            # Any HTTP response (even 4xx) means the server is up
+            sys.stdout.write(" ready\n")
+            sys.stdout.flush()
+            return True
+        except Exception:
+            sys.stdout.write(".")
+            sys.stdout.flush()
+            time.sleep(1)
+    sys.stdout.write(" TIMEOUT\n")
+    return False
+
+
+def _open_browser(url: str):
+    """Open a URL in the default browser and log it."""
+    _log(f"opening {url}")
+    webbrowser.open(url)
+
+
 # == Commands ==================================================================
 
 def cmd_testenv_start():
@@ -281,7 +314,10 @@ def cmd_testenv_reset():
 def cmd_dapp_dev():
     """Start the Next.js dapp with yarn dev."""
     _log("Starting Next.js dapp...")
-    return _launch("dapp", _yarn() + ["dev"], P["dapp"])
+    proc = _launch("dapp", _yarn() + ["dev"], P["dapp"])
+    if _wait_http(DAPP_PORT, label="dapp"):
+        _open_browser(f"http://localhost:{DAPP_PORT}")
+    return proc
 
 
 def cmd_dapp_poller():
@@ -307,7 +343,10 @@ def cmd_dapp_backfill():
 def cmd_rotman_server():
     """Start the rotman web UI server."""
     _log("Starting rotman server...")
-    return _launch("rotman", [_py("rotman"), "server.py"], P["rotman"])
+    proc = _launch("rotman", [_py("rotman"), "server.py"], P["rotman"])
+    if _wait_http(ROTMAN_PORT, label="rotman"):
+        _open_browser(f"http://localhost:{ROTMAN_PORT}")
+    return proc
 
 
 def cmd_rotman_generate(channel, topic):
@@ -334,13 +373,19 @@ def cmd_bench_run():
 def cmd_gitmanager():
     """Start the gitmanager server."""
     _log("Starting gitmanager server...")
-    return _launch("gitmanager", [sys.executable, "server.py"], P["gitmanager"])
+    proc = _launch("gitmanager", [sys.executable, "server.py"], P["gitmanager"])
+    if _wait_http(GITMANAGER_PORT, label="gitmanager"):
+        _open_browser(f"http://localhost:{GITMANAGER_PORT}")
+    return proc
 
 
 def cmd_conduler():
     """Start the conduler server."""
     _log("Starting conduler server...")
-    return _launch("conduler", [sys.executable, "main.py"], P["conduler"])
+    proc = _launch("conduler", [sys.executable, "main.py"], P["conduler"])
+    if _wait_http(CONDULER_PORT, label="conduler"):
+        _open_browser(f"http://localhost:{CONDULER_PORT}")
+    return proc
 
 
 def _short_cmd(cmd: str) -> str:
