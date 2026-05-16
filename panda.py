@@ -23,6 +23,12 @@ Usage
     python panda.py llm start                        # start llama-swap on :8080
     python panda.py llm stop                         # stop llama-swap
     python panda.py llm status                       # check LLM health + loaded models
+    python panda.py vps ssh                          # open SSH session to VPS
+    python panda.py vps status                       # pm2 + screen + disk + memory
+    python panda.py vps logs pp                      # pm2 logs for dapp
+    python panda.py vps logs bot                     # screen hardcopy for telegram bot
+    python panda.py vps restart pp                   # pm2 restart dapp
+    python panda.py vps deploy pp                    # git pull + pm2 restart dapp
     python panda.py status                           # show running services
     python panda.py stop                             # stop all tracked services
     python panda.py -h | --help
@@ -42,9 +48,6 @@ from pathlib import Path
 
 # == Paths =====================================================================
 
-# Root is the directory that contains panda-cli/ — i.e. the ecosystem root.
-# Works regardless of username or install location as long as panda-cli/
-# sits directly inside the ecosystem root alongside all other projects.
 ROOT = Path(__file__).resolve().parent.parent
 
 P = {
@@ -56,30 +59,24 @@ P = {
     "conduler":   ROOT / "conduler",
 }
 
-# Node.js tooling — auto-detect from PATH, fall back to default install location.
 import shutil as _shutil
 
 def _find_node_bin(name: str) -> str:
-    """Resolve a Node.js binary: PATH first, then Program Files fallback."""
     found = _shutil.which(name)
     if found:
         return found
-    # Windows default install location
     fallback = Path(r"C:\Program Files\nodejs") / (name + ".cmd")
     if fallback.exists():
         return str(fallback)
-    # Last resort — let the OS raise a useful error at call time
     return name
 
 NPM  = _find_node_bin("npm")
 NPX  = _find_node_bin("npx")
-YARN = _find_node_bin("yarn")  # may not exist; _yarn() handles fallback
+YARN = _find_node_bin("yarn")
 
-# State dir (tracks PIDs across commands)
 PANDA_DIR = ROOT / ".panda"
 PIDS_FILE = PANDA_DIR / "pids.json"
 
-# Ports
 HARDHAT_PORT    = 8545
 DAPP_PORT       = 3000
 GITMANAGER_PORT = 8765
@@ -87,20 +84,27 @@ CONDULER_PORT   = 7071
 ROTMAN_PORT     = 7070
 LLAMA_SWAP_PORT = 8080
 
-# llama-swap paths
-# Override LLAMA_SWAP_EXE_DEFAULT by setting the LLAMA_SWAP_EXE env var.
 LLAMA_SWAP_EXE_DEFAULT = Path(r"C:\llama.cpp\llama-swap.exe")
 LLAMA_SWAP_CONFIG      = Path(r"C:\llama.cpp\config.yaml")
+
+# == VPS config ================================================================
+
+VPS_HOST    = os.environ.get("PANDA_VPS_HOST", "191.96.1.29")
+VPS_USER    = os.environ.get("PANDA_VPS_USER", "panda")
+VPS_KEY     = os.environ.get("PANDA_VPS_KEY",  str(Path.home() / ".ssh" / "mcp_ssh_ed25519"))
+
+# pm2 app name -> repo path on VPS
+VPS_PM2_REPOS = {
+    "pp": "remote_project_path<",
+}
+
+# screen session names
+VPS_SCREENS = ["bot"]
 
 
 # == Python resolver ===========================================================
 
 def _py(project_key: str) -> str:
-    """
-    Return the Python executable for a project.
-    Prefers the project's own venv if present, falls back to the
-    interpreter running this script.
-    """
     venv_py = P[project_key] / "venv" / "Scripts" / "python.exe"
     if venv_py.exists():
         return str(venv_py)
@@ -108,15 +112,11 @@ def _py(project_key: str) -> str:
 
 
 def _yarn() -> list:
-    """Return a working yarn invocation for this machine."""
-    # If _find_node_bin resolved a real path, use it directly
     if Path(YARN).exists():
         return [YARN]
-    # yarn installed globally via npm (common on Windows)
     user_yarn = Path(os.environ.get("APPDATA", "")) / "npm" / "yarn.cmd"
     if user_yarn.exists():
         return [str(user_yarn)]
-    # last resort: npx yarn (slower but always works if npx is available)
     return [NPX, "yarn"]
 
 
@@ -136,8 +136,6 @@ def _pids_save(pids: dict):
 
 def _pid_alive(pid: int) -> bool:
     if sys.platform == "win32":
-        # os.kill(pid, 0) is unreliable across console sessions on Windows.
-        # tasklist is the authoritative way to check process existence.
         result = subprocess.run(
             ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
             capture_output=True, text=True,
@@ -148,7 +146,7 @@ def _pid_alive(pid: int) -> bool:
             os.kill(pid, 0)
             return True
         except PermissionError:
-            return True  # exists but different session
+            return True
         except OSError:
             return False
 
@@ -166,8 +164,6 @@ def _register(name: str, proc: "subprocess.Popen[bytes]", label: str):
 def _kill(pid: int, name: str):
     try:
         if sys.platform == "win32":
-            # /F  force-terminates
-            # /T  kills the entire process tree (children included)
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 stdout=subprocess.DEVNULL,
@@ -190,10 +186,6 @@ def _log(msg: str, prefix: str = "panda"):
 # == Process launchers =========================================================
 
 def _launch(name: str, cmd: list, cwd: Path) -> "subprocess.Popen[bytes]":
-    """
-    Launch a long-running background service in a new console window
-    (Windows) so its logs remain visible. Tracks the PID in pids.json.
-    """
     kwargs: dict = {"cwd": str(cwd)}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NEW_CONSOLE
@@ -209,17 +201,38 @@ def _launch(name: str, cmd: list, cwd: Path) -> "subprocess.Popen[bytes]":
 
 
 def _run(cmd: list, cwd: Path, label: str):
-    """Run a command synchronously; raise RuntimeError on non-zero exit."""
     _log(f"running: {label}")
     result = subprocess.run(cmd, cwd=str(cwd))
     if result.returncode != 0:
         raise RuntimeError(f"'{label}' failed (exit {result.returncode})")
 
 
+# == SSH helpers ===============================================================
+
+def _ssh_base() -> list:
+    """Base ssh command with the MCP key."""
+    return ["ssh", "-i", VPS_KEY, f"{VPS_USER}@{VPS_HOST}"]
+
+
+def _ssh_run(remote_cmd: str) -> int:
+    """Run a command on the VPS, streaming output. Returns exit code."""
+    result = subprocess.run(_ssh_base() + [remote_cmd])
+    return result.returncode
+
+
+def _ssh_capture(remote_cmd: str) -> tuple[str, int]:
+    """Run a command on the VPS, capture output. Returns (output, exit_code)."""
+    result = subprocess.run(
+        _ssh_base() + [remote_cmd],
+        capture_output=True, text=True,
+    )
+    out = (result.stdout + result.stderr).strip()
+    return out, result.returncode
+
+
 # == Wait helpers ==============================================================
 
 def _wait_rpc(port: int, timeout: int = 45, label: str = "RPC") -> bool:
-    """Poll an ETH JSON-RPC endpoint until it responds or timeout."""
     url  = f"http://127.0.0.1:{port}"
     body = json.dumps({
         "jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1
@@ -245,7 +258,6 @@ def _wait_rpc(port: int, timeout: int = 45, label: str = "RPC") -> bool:
 
 
 def _wait_http(port: int, path: str = "/", timeout: int = 30, label: str = "HTTP") -> bool:
-    """Poll a plain HTTP endpoint until it responds with any status or timeout."""
     url = f"http://127.0.0.1:{port}{path}"
     deadline = time.time() + timeout
     sys.stdout.write(f"    waiting for {label}")
@@ -257,7 +269,6 @@ def _wait_http(port: int, path: str = "/", timeout: int = 30, label: str = "HTTP
             sys.stdout.flush()
             return True
         except urllib.error.HTTPError:
-            # Any HTTP response (even 4xx) means the server is up
             sys.stdout.write(" ready\n")
             sys.stdout.flush()
             return True
@@ -270,46 +281,102 @@ def _wait_http(port: int, path: str = "/", timeout: int = 30, label: str = "HTTP
 
 
 def _open_browser(url: str):
-    """Open a URL in the default browser and log it."""
     _log(f"opening {url}")
     webbrowser.open(url)
 
 
-# == Commands ==================================================================
+# == VPS commands ==============================================================
+
+def cmd_vps_ssh():
+    """Open an interactive SSH session to the VPS."""
+    _log(f"Connecting to {VPS_USER}@{VPS_HOST}...")
+    subprocess.run(_ssh_base())
+
+
+def cmd_vps_status():
+    """Show pm2 list, screen sessions, disk and memory on the VPS."""
+    print()
+    print("  ── pm2 ─────────────────────────────────────")
+    _ssh_run("pm2 list")
+    print()
+    print("  ── screen sessions ─────────────────────────")
+    _ssh_run("screen -ls 2>&1 || true")
+    print()
+    print("  ── disk ─────────────────────────────────────")
+    _ssh_run("df -h --output=source,size,used,avail,pcent,target | column -t")
+    print()
+    print("  ── memory ───────────────────────────────────")
+    _ssh_run("free -h")
+    print()
+
+
+def cmd_vps_logs(target: str):
+    """
+    Stream recent logs for a VPS service.
+    target: pm2 app name (e.g. 'pp') or screen session name (e.g. 'bot')
+    """
+    if target in VPS_PM2_REPOS:
+        _log(f"pm2 logs for '{target}' (last 50 lines)...")
+        _ssh_run(
+            f"echo '=== OUT ===' && tail -n 50 ~/.pm2/logs/{target}-out.log 2>/dev/null; "
+            f"echo '=== ERROR ===' && tail -n 50 ~/.pm2/logs/{target}-error.log 2>/dev/null"
+        )
+    elif target in VPS_SCREENS:
+        _log(f"screen hardcopy for '{target}'...")
+        tmp = f"/tmp/panda_screen_{target}.txt"
+        _ssh_run(f"screen -S {target} -X hardcopy {tmp} && sleep 0.2 && cat {tmp} && rm -f {tmp}")
+    else:
+        known = list(VPS_PM2_REPOS.keys()) + VPS_SCREENS
+        print(f"Unknown target '{target}'. Known: {known}")
+        sys.exit(1)
+
+
+def cmd_vps_restart(name: str):
+    """Restart a pm2 app on the VPS."""
+    if name not in VPS_PM2_REPOS:
+        print(f"Unknown pm2 app '{name}'. Known: {list(VPS_PM2_REPOS.keys())}")
+        sys.exit(1)
+    _log(f"Restarting pm2 app '{name}' on VPS...")
+    code = _ssh_run(f"pm2 restart {name} && pm2 list")
+    if code == 0:
+        _log("Restart successful.")
+    else:
+        _log(f"Restart failed (exit {code}).")
+
+
+def cmd_vps_deploy(name: str):
+    """git pull + pm2 restart for a VPS app."""
+    if name not in VPS_PM2_REPOS:
+        print(f"Unknown app '{name}'. Known: {list(VPS_PM2_REPOS.keys())}")
+        sys.exit(1)
+    repo = VPS_PM2_REPOS[name]
+    _log(f"Deploying '{name}': git pull {repo} + pm2 restart...")
+    code = _ssh_run(f"cd {repo} && git pull && pm2 restart {name} && pm2 list")
+    if code == 0:
+        _log("Deploy successful.")
+    else:
+        _log(f"Deploy failed (exit {code}).")
+
+
+# == Existing commands =========================================================
 
 def cmd_testenv_start():
-    """Start Hardhat node then deploy + seed the contract."""
     _log("Starting Hardhat node...")
-    proc_hh = _launch(
-        "hardhat",
-        [NPX, "hardhat", "node"],
-        P["testenv"],
-    )
+    proc_hh = _launch("hardhat", [NPX, "hardhat", "node"], P["testenv"])
     if not _wait_rpc(HARDHAT_PORT, timeout=45, label="Hardhat"):
         raise RuntimeError("Hardhat node did not respond in time.")
-
     _log("Deploying and seeding contract (scramble_health.py)...")
-    _run(
-        [_py("testenv"), "scramble_health.py"],
-        P["testenv"],
-        "scramble_health.py",
-    )
+    _run([_py("testenv"), "scramble_health.py"], P["testenv"], "scramble_health.py")
     _log("Contract deployed and seeded.")
     return proc_hh
 
 
 def cmd_testenv_sim():
-    """Start trade_sim.py in a background window."""
     _log("Starting trade simulator...")
-    return _launch(
-        "trade_sim",
-        [_py("testenv"), "trade_sim.py"],
-        P["testenv"],
-    )
+    return _launch("trade_sim", [_py("testenv"), "trade_sim.py"], P["testenv"])
 
 
 def cmd_testenv_reset():
-    """Kill all running services and do a fresh deploy + seed."""
     _log("Resetting dev environment...")
     pids = _pids_load()
     for name in ("hardhat", "trade_sim", "price_poller", "dapp"):
@@ -322,7 +389,6 @@ def cmd_testenv_reset():
 
 
 def cmd_dapp_dev():
-    """Start the Next.js dapp with yarn dev."""
     _log("Starting Next.js dapp...")
     proc = _launch("dapp", _yarn() + ["dev"], P["dapp"])
     if _wait_http(DAPP_PORT, label="dapp"):
@@ -331,27 +397,16 @@ def cmd_dapp_dev():
 
 
 def cmd_dapp_poller():
-    """Start price_poller.py targeting the local Hardhat node."""
     _log("Starting price poller (local)...")
-    return _launch(
-        "price_poller",
-        [sys.executable, "scripts/price_poller.py", "--local"],
-        P["dapp"],
-    )
+    return _launch("price_poller", [sys.executable, "scripts/price_poller.py", "--local"], P["dapp"])
 
 
 def cmd_dapp_backfill():
-    """Run backfill.py against the local Hardhat node (blocking)."""
     _log("Running backfill (local)...")
-    _run(
-        [sys.executable, "scripts/backfill.py", "--local"],
-        P["dapp"],
-        "backfill.py --local",
-    )
+    _run([sys.executable, "scripts/backfill.py", "--local"], P["dapp"], "backfill.py --local")
 
 
 def cmd_rotman_server():
-    """Start the rotman web UI server."""
     _log("Starting rotman server...")
     proc = _launch("rotman", [_py("rotman"), "server.py"], P["rotman"])
     if _wait_http(ROTMAN_PORT, label="rotman"):
@@ -360,7 +415,6 @@ def cmd_rotman_server():
 
 
 def cmd_rotman_generate(channel, topic):
-    """Run the rotman pipeline for a channel (blocking)."""
     if not channel:
         print("usage: panda rotman generate <channel> [topic]")
         sys.exit(1)
@@ -371,17 +425,14 @@ def cmd_rotman_generate(channel, topic):
 
 
 def cmd_rotman_queue():
-    """Show the rotman topic queue (blocking)."""
     _run([_py("rotman"), "topic_queue.py", "--list"], P["rotman"], "rotman queue")
 
 
 def cmd_bench_run():
-    """Run ollama-bench (blocking)."""
     _run([sys.executable, "bench.py"], P["bench"], "ollama-bench")
 
 
 def cmd_gitmanager():
-    """Start the gitmanager server."""
     _log("Starting gitmanager server...")
     proc = _launch("gitmanager", [sys.executable, "server.py"], P["gitmanager"])
     if _wait_http(GITMANAGER_PORT, label="gitmanager"):
@@ -390,7 +441,6 @@ def cmd_gitmanager():
 
 
 def cmd_conduler():
-    """Start the conduler server."""
     _log("Starting conduler server...")
     proc = _launch("conduler", [sys.executable, "main.py"], P["conduler"])
     if _wait_http(CONDULER_PORT, label="conduler"):
@@ -398,17 +448,7 @@ def cmd_conduler():
     return proc
 
 
-# == LLM (llama-swap) =========================================================
-
 def _find_llama_swap_exe() -> str | None:
-    """
-    Locate the llama-swap binary.
-    Priority:
-      1. LLAMA_SWAP_EXE environment variable
-      2. LLAMA_SWAP_EXE_DEFAULT  (C:\\llama.cpp\\llama-swap.exe)
-      3. shutil.which('llama-swap')  — system PATH
-    Returns None if not found anywhere.
-    """
     env_override = os.environ.get("LLAMA_SWAP_EXE")
     if env_override and Path(env_override).exists():
         return env_override
@@ -421,14 +461,11 @@ def _find_llama_swap_exe() -> str | None:
 
 
 def cmd_llm_start():
-    """Start llama-swap on port 8080 and wait until it is ready."""
-    # Guard: already running?
     pids = _pids_load()
     info = pids.get("llama-swap")
     if info and _pid_alive(info["pid"]):
         _log(f"llama-swap already running (PID {info['pid']})")
         return
-
     exe = _find_llama_swap_exe()
     if not exe:
         raise RuntimeError(
@@ -438,8 +475,7 @@ def cmd_llm_start():
         )
     if not LLAMA_SWAP_CONFIG.exists():
         raise RuntimeError(f"llama-swap config not found: {LLAMA_SWAP_CONFIG}")
-
-    _log(f"Starting llama-swap  ({exe})...")
+    _log(f"Starting llama-swap ({exe})...")
     proc = _launch(
         "llama-swap",
         [exe, "--config", str(LLAMA_SWAP_CONFIG), "--listen", f"0.0.0.0:{LLAMA_SWAP_PORT}"],
@@ -450,7 +486,6 @@ def cmd_llm_start():
 
 
 def cmd_llm_stop():
-    """Stop the llama-swap process tracked in pids.json."""
     pids = _pids_load()
     info = pids.get("llama-swap")
     if not info:
@@ -462,7 +497,6 @@ def cmd_llm_stop():
 
 
 def cmd_llm_status():
-    """Check llama-swap health and print the models currently available."""
     url = f"http://127.0.0.1:{LLAMA_SWAP_PORT}/v1/models"
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:
@@ -482,13 +516,7 @@ def cmd_llm_status():
 
 
 def _short_cmd(cmd: str) -> str:
-    """
-    Strip the Python interpreter prefix from a stored command string so the
-    status table shows just the script + args rather than the full exe path.
-    e.g. 'C:\\...\\python.exe server.py' -> 'server.py'
-    """
     parts = cmd.split()
-    # Drop leading token(s) that look like a Python executable
     while parts and (parts[0].lower().endswith(("python.exe", "python", "python3"))):
         parts = parts[1:]
     result = " ".join(parts)
@@ -496,12 +524,10 @@ def _short_cmd(cmd: str) -> str:
 
 
 def cmd_status():
-    """Print a status table of all tracked services."""
     pids = _pids_load()
     if not pids:
         print("\n  No services currently tracked.\n")
         return
-
     print()
     print(f"  {'SERVICE':<16} {'PID':<8} {'STATUS':<10} {'STARTED (UTC)':<22} COMMAND")
     print(f"  {'-'*16} {'-'*8} {'-'*10} {'-'*22} {'-'*42}")
@@ -517,50 +543,36 @@ def cmd_status():
 
 
 def cmd_stop():
-    """Stop all services tracked in pids.json."""
     pids = _pids_load()
     if not pids:
         _log("Nothing running.")
         return
     for name, info in pids.items():
         pid = info.get("pid", 0)
-        # Always attempt the kill — _pid_alive can misread cross-session
-        # processes on Windows, so we don't gate on it here.
         _kill(pid, name)
     _pids_save({})
     _log("All services stopped.")
 
 
 def cmd_dev():
-    """
-    Full local dev stack in the correct startup order.
-    Blocks until Ctrl+C, then tears everything down cleanly.
-    """
     print()
     print("  +--------------------------------------------+")
     print("  |   PandaPoints - Full Dev Stack             |")
     print("  +--------------------------------------------+")
     print()
-
     _log("[1/5] Starting llama-swap (LLM server)...")
     try:
         cmd_llm_start()
     except RuntimeError as e:
         _log(f"WARNING: LLM server not started — {e}")
-        _log("         Run 'python panda.py llm start' separately when ready.")
-
     _log("[2/5] Starting Hardhat node + deploying contract...")
     cmd_testenv_start()
-
     _log("[3/5] Starting trade simulator...")
     cmd_testenv_sim()
-
     _log("[4/5] Starting price poller (local)...")
     cmd_dapp_poller()
-
     _log("[5/5] Starting Next.js dapp...")
     cmd_dapp_dev()
-
     print()
     print("  +--------------------------------------------+")
     print(f"  |  Dapp         ->  http://localhost:{DAPP_PORT}      |")
@@ -570,7 +582,6 @@ def cmd_dev():
     print("  |  Ctrl+C  ->  stop all services            |")
     print("  +--------------------------------------------+")
     print()
-
     try:
         while True:
             time.sleep(5)
@@ -611,10 +622,21 @@ commands:
   llm stop                              stop llama-swap
   llm status                            check LLM health + list loaded models
 
+  vps ssh                               open interactive SSH session to VPS
+  vps status                            pm2 + screen + disk + memory on VPS
+  vps logs <pp|bot>                     tail logs for dapp (pp) or bot (bot)
+  vps restart <pp>                      pm2 restart a VPS app
+  vps deploy <pp>                       git pull + pm2 restart on VPS
+
   status                                table of tracked services + PIDs
   stop                                  kill all tracked services
 
   -h, --help                            show this message
+
+vps env vars (optional overrides):
+  PANDA_VPS_HOST    default: 191.96.1.29
+  PANDA_VPS_USER    default: panda
+  PANDA_VPS_KEY     default: ~/.ssh/mcp_ssh_ed25519
 """
 
 
@@ -667,6 +689,30 @@ def main():
         elif cmd == "bench":
             sub = argv[1] if len(argv) > 1 else ""
             if sub == "run": cmd_bench_run()
+            else: _unknown_sub(cmd, sub)
+
+        elif cmd == "vps":
+            sub = argv[1] if len(argv) > 1 else ""
+            if   sub == "ssh":     cmd_vps_ssh()
+            elif sub == "status":  cmd_vps_status()
+            elif sub == "logs":
+                target = argv[2] if len(argv) > 2 else ""
+                if not target:
+                    print("usage: panda vps logs <pp|bot>")
+                    sys.exit(1)
+                cmd_vps_logs(target)
+            elif sub == "restart":
+                name = argv[2] if len(argv) > 2 else ""
+                if not name:
+                    print("usage: panda vps restart <pp>")
+                    sys.exit(1)
+                cmd_vps_restart(name)
+            elif sub == "deploy":
+                name = argv[2] if len(argv) > 2 else ""
+                if not name:
+                    print("usage: panda vps deploy <pp>")
+                    sys.exit(1)
+                cmd_vps_deploy(name)
             else: _unknown_sub(cmd, sub)
 
         elif cmd == "gitmanager": cmd_gitmanager()
