@@ -29,6 +29,7 @@ Usage
     python panda.py vps logs bot                     # screen hardcopy for telegram bot
     python panda.py vps restart pp                   # pm2 restart dapp
     python panda.py vps deploy pp                    # git pull + pm2 restart dapp
+    python panda.py vps send <local> <remote>        # scp file to VPS
     python panda.py status                           # show running services
     python panda.py stop                             # stop all tracked services
     python panda.py -h | --help
@@ -344,6 +345,20 @@ def cmd_vps_restart(name: str):
         _log(f"Restart failed (exit {code}).")
 
 
+def cmd_vps_send(local_path: str, remote_path: str):
+    """Upload a local file to the VPS via scp."""
+    _log(f"Sending {local_path} -> {VPS_USER}@{VPS_HOST}:{remote_path}")
+    result = subprocess.run([
+        "scp", "-i", VPS_KEY,
+        local_path,
+        f"{VPS_USER}@{VPS_HOST}:{remote_path}"
+    ])
+    if result.returncode == 0:
+        _log("File sent successfully.")
+    else:
+        _log(f"scp failed (exit {result.returncode}).")
+
+
 def cmd_vps_deploy(name: str):
     """git pull + pm2 restart for a VPS app."""
     if name not in VPS_PM2_REPOS:
@@ -627,6 +642,7 @@ commands:
   vps logs <pp|bot>                     tail logs for dapp (pp) or bot (bot)
   vps restart <pp>                      pm2 restart a VPS app
   vps deploy <pp>                       git pull + pm2 restart on VPS
+  vps send <local_path> <remote_path>   scp a file to the VPS
 
   status                                table of tracked services + PIDs
   stop                                  kill all tracked services
@@ -713,6 +729,13 @@ def main():
                     print("usage: panda vps deploy <pp>")
                     sys.exit(1)
                 cmd_vps_deploy(name)
+            elif sub == "send":
+                local  = argv[2] if len(argv) > 2 else ""
+                remote = argv[3] if len(argv) > 3 else ""
+                if not local or not remote:
+                    print("usage: panda vps send <local_path> <remote_path>")
+                    sys.exit(1)
+                cmd_vps_send(local, remote)
             else: _unknown_sub(cmd, sub)
 
         elif cmd == "gitmanager": cmd_gitmanager()
