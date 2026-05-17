@@ -84,6 +84,25 @@ panda gitmanager        # gitmanager server (port 8000)
 panda conduler          # conduler server (port 7071)
 ```
 
+## VPS commands
+
+```bash
+panda vps ssh                          # open interactive SSH session
+panda vps status                       # pm2 + disk + memory on VPS
+panda vps logs <pp|telegramBot>        # tail pm2 logs
+panda vps restart <pp|telegramBot>     # pm2 restart
+panda vps deploy <pp>                  # git pull + pm2 restart
+panda vps send <local> <remote>        # scp a file to the VPS
+```
+
+Requires these env vars (no hardcoded defaults):
+
+```
+PANDA_VPS_HOST    VPS hostname or IP address
+PANDA_VPS_USER    SSH user on the VPS
+PANDA_VPS_KEY     path to SSH private key (default: ~/.ssh/mcp_ssh_ed25519)
+```
+
 ## PID tracking
 
 Running services are tracked in `<ecosystem-root>/.panda/pids.json`.

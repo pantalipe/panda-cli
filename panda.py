@@ -90,8 +90,8 @@ LLAMA_SWAP_CONFIG      = Path(r"C:\llama.cpp\config.yaml")
 
 # == VPS config ================================================================
 
-VPS_HOST    = os.environ.get("PANDA_VPS_HOST", "191.96.1.29")
-VPS_USER    = os.environ.get("PANDA_VPS_USER", "panda")
+VPS_HOST    = os.environ.get("PANDA_VPS_HOST", "")
+VPS_USER    = os.environ.get("PANDA_VPS_USER", "")
 VPS_KEY     = os.environ.get("PANDA_VPS_KEY",  str(Path.home() / ".ssh" / "mcp_ssh_ed25519"))
 
 # pm2 app name -> repo path on VPS (git-deployed apps only)
@@ -652,10 +652,10 @@ commands:
 
   -h, --help                            show this message
 
-vps env vars (optional overrides):
-  PANDA_VPS_HOST    default: 191.96.1.29
-  PANDA_VPS_USER    default: panda
-  PANDA_VPS_KEY     default: ~/.ssh/mcp_ssh_ed25519
+vps env vars (required):
+  PANDA_VPS_HOST    VPS hostname or IP address
+  PANDA_VPS_USER    SSH user on the VPS
+  PANDA_VPS_KEY     path to SSH private key (default: ~/.ssh/mcp_ssh_ed25519)
 """
 
 
