@@ -94,13 +94,16 @@ VPS_HOST    = os.environ.get("PANDA_VPS_HOST", "191.96.1.29")
 VPS_USER    = os.environ.get("PANDA_VPS_USER", "panda")
 VPS_KEY     = os.environ.get("PANDA_VPS_KEY",  str(Path.home() / ".ssh" / "mcp_ssh_ed25519"))
 
-# pm2 app name -> repo path on VPS
+# pm2 app name -> repo path on VPS (git-deployed apps only)
 VPS_PM2_REPOS = {
     "pp": "remote_project_path<",
 }
 
-# screen session names
-VPS_SCREENS = ["bot"]
+# all pm2 apps — supports logs + restart (no git deploy required)
+VPS_PM2_APPS = ["pp", "bot"]
+
+# screen session names (empty — bot migrated to pm2)
+VPS_SCREENS = []
 
 
 # == Python resolver ===========================================================
@@ -316,7 +319,7 @@ def cmd_vps_logs(target: str):
     Stream recent logs for a VPS service.
     target: pm2 app name (e.g. 'pp') or screen session name (e.g. 'bot')
     """
-    if target in VPS_PM2_REPOS:
+    if target in VPS_PM2_APPS:
         _log(f"pm2 logs for '{target}' (last 50 lines)...")
         _ssh_run(
             f"echo '=== OUT ===' && tail -n 50 ~/.pm2/logs/{target}-out.log 2>/dev/null; "
@@ -334,8 +337,8 @@ def cmd_vps_logs(target: str):
 
 def cmd_vps_restart(name: str):
     """Restart a pm2 app on the VPS."""
-    if name not in VPS_PM2_REPOS:
-        print(f"Unknown pm2 app '{name}'. Known: {list(VPS_PM2_REPOS.keys())}")
+    if name not in VPS_PM2_APPS:
+        print(f"Unknown pm2 app '{name}'. Known: {VPS_PM2_APPS}")
         sys.exit(1)
     _log(f"Restarting pm2 app '{name}' on VPS...")
     code = _ssh_run(f"pm2 restart {name} && pm2 list")
@@ -640,7 +643,7 @@ commands:
   vps ssh                               open interactive SSH session to VPS
   vps status                            pm2 + screen + disk + memory on VPS
   vps logs <pp|bot>                     tail logs for dapp (pp) or bot (bot)
-  vps restart <pp>                      pm2 restart a VPS app
+  vps restart <pp|bot>                  pm2 restart a VPS app
   vps deploy <pp>                       git pull + pm2 restart on VPS
   vps send <local_path> <remote_path>   scp a file to the VPS
 
