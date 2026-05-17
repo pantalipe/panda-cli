@@ -1,6 +1,9 @@
 # Runtime state
 .panda/
 
+# Environment
+.env
+
 # Python
 __pycache__/
 *.pyc

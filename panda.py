@@ -47,6 +47,28 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
+# == Load .env ================================================================
+# Auto-load a .env file from the panda-cli directory if present.
+# Format: KEY=VALUE, one per line. Blank lines and # comments are ignored.
+# Does NOT override variables that are already set in the environment.
+
+def _load_dotenv():
+    env_file = Path(__file__).resolve().parent / ".env"
+    if not env_file.exists():
+        return
+    with open(env_file, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+_load_dotenv()
+
 # == Paths =====================================================================
 
 ROOT = Path(__file__).resolve().parent.parent
