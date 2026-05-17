@@ -100,7 +100,7 @@ VPS_PM2_REPOS = {
 }
 
 # all pm2 apps — supports logs + restart (no git deploy required)
-VPS_PM2_APPS = ["pp", "bot"]
+VPS_PM2_APPS = ["pp", "telegramBot"]
 
 # screen session names (empty — bot migrated to pm2)
 VPS_SCREENS = []
@@ -642,8 +642,8 @@ commands:
 
   vps ssh                               open interactive SSH session to VPS
   vps status                            pm2 + screen + disk + memory on VPS
-  vps logs <pp|bot>                     tail logs for dapp (pp) or bot (bot)
-  vps restart <pp|bot>                  pm2 restart a VPS app
+  vps logs <pp|telegramBot>             tail logs for dapp (pp) or bot (telegramBot)
+  vps restart <pp|telegramBot>          pm2 restart a VPS app
   vps deploy <pp>                       git pull + pm2 restart on VPS
   vps send <local_path> <remote_path>   scp a file to the VPS
 
