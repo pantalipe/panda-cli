@@ -1,0 +1,3 @@
+display_name: Panda Ecosystem
+short_description: Work across the local PandaPoints multi-repo ecosystem using projects.json and panda-cli.
+default_prompt: Use the Panda ecosystem registry and panda-cli to inspect the requested project, make the needed change safely, and validate it.

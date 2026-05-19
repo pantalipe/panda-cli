@@ -24,6 +24,21 @@ ecosystem-root/
 works on any machine, any username, and any drive letter — no configuration
 needed.
 
+## Codex skill
+
+The Panda ecosystem Codex skill is versioned in this repo at
+`.codex/skills/panda-ecosystem/`.
+
+The active local copy lives at:
+
+```text
+workspace_root</.codex/skills/panda-ecosystem/
+```
+
+When updating the skill, edit the versioned copy here first, then sync it into
+the local Codex skills directory so future Codex sessions load the same
+instructions.
+
 Node.js binaries (`npx`, `npm`, `yarn`) are resolved from PATH first, then fall
 back to the Windows default install location (`C:\Program Files\nodejs`).
 
