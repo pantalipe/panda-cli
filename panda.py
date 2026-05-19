@@ -38,6 +38,7 @@ Usage
 import json
 import os
 import signal
+import shlex
 import subprocess
 import sys
 import time
@@ -100,6 +101,9 @@ YARN = _find_node_bin("yarn")
 PANDA_DIR = ROOT / ".panda"
 PIDS_FILE = PANDA_DIR / "pids.json"
 
+# Registry shared with gitmanager. Override when testing another ecosystem.
+PROJECTS_JSON = Path(os.environ.get("PROJECTS_JSON", str(ROOT / "gitmanager" / "projects.json")))
+
 HARDHAT_PORT    = 8545
 DAPP_PORT       = 3000
 GITMANAGER_PORT = 8765
@@ -110,23 +114,69 @@ LLAMA_SWAP_PORT = 8080
 LLAMA_SWAP_EXE_DEFAULT = Path(r"C:\llama.cpp\llama-swap.exe")
 LLAMA_SWAP_CONFIG      = Path(r"C:\llama.cpp\config.yaml")
 
+
+
+def _env_csv(*names: str, default: str = "") -> list[str]:
+    for name in names:
+        value = os.environ.get(name, "")
+        if value:
+            return [item.strip() for item in value.split(",") if item.strip()]
+    return [item.strip() for item in default.split(",") if item.strip()]
+
+
+def _env_json(*names: str) -> dict:
+    for name in names:
+        value = os.environ.get(name, "")
+        if value:
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+    return {}
+
 # == VPS config ================================================================
 
-VPS_HOST    = os.environ.get("PANDA_VPS_HOST", "")
-VPS_USER    = os.environ.get("PANDA_VPS_USER", "")
-VPS_KEY     = os.environ.get("PANDA_VPS_KEY",  str(Path.home() / ".ssh" / "mcp_ssh_ed25519"))
+VPS_HOST    = os.environ.get("PANDA_VPS_HOST") or os.environ.get("MCP_SSH_HOST", "")
+VPS_PORT    = os.environ.get("PANDA_VPS_PORT") or os.environ.get("MCP_SSH_PORT", "22")
+VPS_USER    = os.environ.get("PANDA_VPS_USER") or os.environ.get("MCP_SSH_USER", "")
+VPS_KEY     = os.environ.get("PANDA_VPS_KEY") or os.environ.get("MCP_SSH_KEY_PATH", str(Path.home() / ".ssh" / "mcp_ssh_ed25519"))
+VPS_KEY_PASS = os.environ.get("ssh_passphrase_env<") or os.environ.get("ssh_passphrase_env<", "")
+
+PANDA_SSH_AUDIT_LOG = Path(os.environ.get("PANDA_SSH_AUDIT_LOG", str(Path.home() / ".mcp-ssh" / "audit.log")))
+
+# systemd services allowed for controlled status/restart/logs
+VPS_SYSTEMD_SERVICES = _env_csv("PANDA_SSH_ALLOWED_SERVICES", "MCP_SSH_ALLOWED_SERVICES", default="nginx")
+
+# all pm2 apps supported by controlled logs/restart
+VPS_PM2_APPS = _env_csv("PANDA_SSH_ALLOWED_PM2", "MCP_SSH_ALLOWED_PM2", default="pp,telegramBot")
+
+# screen session names supported by controlled inspection
+VPS_SCREENS = _env_csv("PANDA_SSH_ALLOWED_SCREENS", "MCP_SSH_ALLOWED_SCREENS", default="")
+
+# repo paths allowed for remote git status/pull
+_ALLOWED_REPO_LIST = _env_csv("PANDA_SSH_ALLOWED_REPOS", "MCP_SSH_ALLOWED_REPOS", default="remote_project_path<")
+VPS_ALLOWED_REPOS = set(_ALLOWED_REPO_LIST)
 
 # pm2 app name -> repo path on VPS (git-deployed apps only)
-VPS_PM2_REPOS = {
-    "pp": "remote_project_path<",
+VPS_PM2_REPOS = {"pp": "remote_project_path<"}
+for item in _env_csv("PANDA_SSH_PM2_REPOS", default=""):
+    if "=" in item:
+        name, repo = item.split("=", 1)
+        VPS_PM2_REPOS[name.strip()] = repo.strip()
+
+_CMD_DEFAULTS = {
+    "systemctl-enable-nginx": "sudo -n systemctl enable nginx",
+    "systemctl-disable-nginx": "sudo -n systemctl disable nginx",
+    "systemctl-enable-pm2": "sudo -n systemctl enable pm2-panda",
+    "pm2-startup": "pm2 startup systemd",
+    "pm2-install-startup": "sudo env PATH=$PATH:/usr/bin /usr/local/lib/node_modules/pm2/bin/pm2 startup systemd -u panda --hp remote_home<",
+    "pm2-save": "pm2 save",
+    "pm2-resurrect": "pm2 resurrect",
+    "nginx-configtest": "sudo -n nginx -t",
+    "whoami": "whoami && id",
+    "env-path": "echo $PATH",
 }
-
-# all pm2 apps — supports logs + restart (no git deploy required)
-VPS_PM2_APPS = ["pp", "telegramBot"]
-
-# screen session names (empty — bot migrated to pm2)
-VPS_SCREENS = []
-
+VPS_ALLOWED_COMMANDS = {**_CMD_DEFAULTS, **_env_json("PANDA_SSH_ALLOWED_COMMANDS", "MCP_SSH_ALLOWED_COMMANDS")}
 
 # == Python resolver ===========================================================
 
@@ -236,18 +286,67 @@ def _run(cmd: list, cwd: Path, label: str):
 # == SSH helpers ===============================================================
 
 def _ssh_base() -> list:
-    """Base ssh command with the MCP key."""
-    return ["ssh", "-i", VPS_KEY, f"{VPS_USER}@{VPS_HOST}"]
+    """Base ssh command with the configured key."""
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-p", str(VPS_PORT), "-i", VPS_KEY, f"{VPS_USER}@{VPS_HOST}"]
+
+
+def _ssh_paramiko_exec(remote_cmd: str) -> tuple[str, str, int]:
+    try:
+        import paramiko
+    except ImportError as exc:
+        raise RuntimeError("paramiko is not installed") from exc
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
+    known_hosts = Path.home() / ".ssh" / "known_hosts"
+    if known_hosts.exists():
+        client.load_host_keys(str(known_hosts))
+
+    key = None
+    key_path = Path(VPS_KEY).expanduser()
+    passphrase = VPS_KEY_PASS or None
+    try:
+        key = paramiko.Ed25519Key.from_private_key_file(str(key_path), password=passphrase)
+    except paramiko.ssh_exception.SSHException:
+        key = paramiko.RSAKey.from_private_key_file(str(key_path), password=passphrase)
+
+    client.connect(
+        hostname=VPS_HOST,
+        port=int(VPS_PORT),
+        username=VPS_USER,
+        pkey=key,
+        timeout=15,
+        banner_timeout=15,
+    )
+    try:
+        _, stdout, stderr = client.exec_command(remote_cmd, timeout=30)
+        out = stdout.read().decode("utf-8", errors="replace").strip()
+        err = stderr.read().decode("utf-8", errors="replace").strip()
+        code = stdout.channel.recv_exit_status()
+        return out, err, code
+    finally:
+        client.close()
 
 
 def _ssh_run(remote_cmd: str) -> int:
     """Run a command on the VPS, streaming output. Returns exit code."""
+    if VPS_KEY_PASS:
+        out, err, code = _ssh_paramiko_exec(remote_cmd)
+        if out:
+            print(out)
+        if err:
+            print(err, file=sys.stderr)
+        return code
     result = subprocess.run(_ssh_base() + [remote_cmd])
     return result.returncode
 
 
 def _ssh_capture(remote_cmd: str) -> tuple[str, int]:
     """Run a command on the VPS, capture output. Returns (output, exit_code)."""
+    if VPS_KEY_PASS:
+        out, err, code = _ssh_paramiko_exec(remote_cmd)
+        combined = "\n".join(part for part in (out, err) if part).strip()
+        return combined, code
     result = subprocess.run(
         _ssh_base() + [remote_cmd],
         capture_output=True, text=True,
@@ -255,6 +354,46 @@ def _ssh_capture(remote_cmd: str) -> tuple[str, int]:
     out = (result.stdout + result.stderr).strip()
     return out, result.returncode
 
+
+
+
+def _ssh_audit(action: str, detail: str, success: bool = True):
+    status = "OK" if success else "FAIL"
+    ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        PANDA_SSH_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with open(PANDA_SSH_AUDIT_LOG, "a", encoding="utf-8") as f:
+            f.write(f"{ts} | {status} | {action} | {detail}\n")
+    except OSError as exc:
+        print(f"warning: could not write audit log {PANDA_SSH_AUDIT_LOG}: {exc}", file=sys.stderr)
+
+
+def _ssh_require_config():
+    missing = []
+    if not VPS_HOST:
+        missing.append("PANDA_VPS_HOST or MCP_SSH_HOST")
+    if not VPS_USER:
+        missing.append("PANDA_VPS_USER or MCP_SSH_USER")
+    if missing:
+        raise RuntimeError("Missing VPS config: " + ", ".join(missing))
+
+
+def _ssh_quote(value: str) -> str:
+    return shlex.quote(value)
+
+
+def _ssh_run_audited(action: str, detail: str, remote_cmd: str) -> int:
+    _ssh_require_config()
+    code = _ssh_run(remote_cmd)
+    _ssh_audit(action, detail, success=(code == 0))
+    return code
+
+
+def _ssh_capture_audited(action: str, detail: str, remote_cmd: str) -> tuple[str, int]:
+    _ssh_require_config()
+    out, code = _ssh_capture(remote_cmd)
+    _ssh_audit(action, detail, success=(code == 0))
+    return out, code
 
 # == Wait helpers ==============================================================
 
@@ -309,6 +448,336 @@ def _wait_http(port: int, path: str = "/", timeout: int = 30, label: str = "HTTP
 def _open_browser(url: str):
     _log(f"opening {url}")
     webbrowser.open(url)
+
+
+
+# == Project registry ==========================================================
+
+def _load_projects() -> dict:
+    if not PROJECTS_JSON.exists():
+        raise RuntimeError(f"projects.json not found: {PROJECTS_JSON}")
+    with open(PROJECTS_JSON, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("projects", data)
+
+
+def _project_path(project: str) -> Path:
+    projects = _load_projects()
+    if project not in projects:
+        available = ", ".join(sorted(projects.keys()))
+        raise RuntimeError(f"Unknown project '{project}'. Available: {available}")
+    entry = projects[project]
+    raw = entry.get("path") if isinstance(entry, dict) else entry
+    if not raw:
+        raise RuntimeError(f"Project '{project}' has no path in {PROJECTS_JSON}")
+    return Path(raw).expanduser()
+
+
+def _project_entry(project: str):
+    projects = _load_projects()
+    if project not in projects:
+        available = ", ".join(sorted(projects.keys()))
+        raise RuntimeError(f"Unknown project '{project}'. Available: {available}")
+    return projects[project]
+
+
+def _require_project_arg(argv: list[str], usage: str) -> str:
+    if not argv:
+        print(usage)
+        sys.exit(1)
+    return argv[0]
+
+
+def cmd_projects_list():
+    projects = _load_projects()
+    print()
+    print(f"  {'PROJECT':<22} {'STATUS':<16} {'TYPE':<12} PATH")
+    print(f"  {'-'*22} {'-'*16} {'-'*12} {'-'*40}")
+    for name, entry in sorted(projects.items()):
+        path = entry.get("path", "") if isinstance(entry, dict) else entry
+        status = entry.get("status", "") if isinstance(entry, dict) else ""
+        kind = entry.get("type", "") if isinstance(entry, dict) else ""
+        print(f"  {name:<22} {status:<16} {kind:<12} {path}")
+    print()
+
+
+def cmd_projects_show(project: str):
+    entry = _project_entry(project)
+    print(json.dumps(entry, indent=2, ensure_ascii=False))
+
+
+def cmd_projects_path(project: str):
+    print(_project_path(project))
+
+
+def cmd_projects_status():
+    cmd_git_ecosystem_status()
+
+
+# == Git commands ============================================================== 
+
+def _git(project: str, args: list[str], capture: bool = False) -> subprocess.CompletedProcess:
+    path = _project_path(project)
+    if not path.exists():
+        raise RuntimeError(f"Project path does not exist: {path}")
+    cmd = ["git", "-c", f"safe.directory={path}", "-C", str(path)] + args
+    return subprocess.run(cmd, text=True, capture_output=capture)
+
+
+def _git_output(project: str, args: list[str]) -> str:
+    result = _git(project, args, capture=True)
+    out = (result.stdout or "").rstrip()
+    err = (result.stderr or "").rstrip()
+    if result.returncode != 0:
+        detail = err or out or f"git exited with {result.returncode}"
+        raise RuntimeError(detail)
+    return out
+
+
+def _git_branch(project: str) -> str:
+    branch = _git_output(project, ["branch", "--show-current"])
+    return branch or "(detached HEAD)"
+
+
+def _git_status_counts(project: str) -> tuple[str, int, int, int, int]:
+    status = _git_output(project, ["status", "--porcelain=v1", "-b"])
+    branch = "unknown"
+    staged = unstaged = untracked = ahead = 0
+    for line in status.splitlines():
+        if line.startswith("## "):
+            branch = line[3:].split("...")[0].strip()
+            if "[ahead " in line:
+                try:
+                    ahead = int(line.split("[ahead ", 1)[1].split("]", 1)[0].split(",", 1)[0])
+                except ValueError:
+                    ahead = 0
+            continue
+        if line.startswith("??"):
+            untracked += 1
+            continue
+        if len(line) >= 2:
+            if line[0] != " ":
+                staged += 1
+            if line[1] != " ":
+                unstaged += 1
+    return branch, staged, unstaged, untracked, ahead
+
+
+def cmd_git_status(project: str):
+    print(_git_output(project, ["status", "--short", "--branch"]) or "Working tree clean.")
+
+
+def cmd_git_diff(project: str, file_path: str = ""):
+    args = ["diff"]
+    if file_path:
+        args += ["--", file_path]
+    print(_git_output(project, args) or "(no unstaged changes)")
+
+
+def cmd_git_diff_staged(project: str):
+    print(_git_output(project, ["diff", "--cached"]) or "(no staged changes)")
+
+
+def cmd_git_log(project: str, limit: int = 10):
+    fmt = "%h %s (%cd) <%an>"
+    print(_git_output(project, ["log", f"-{limit}", f"--pretty=format:{fmt}", "--date=short"]) or "(no commits)")
+
+
+def cmd_git_branches(project: str):
+    print(_git_output(project, ["branch", "-vv"]) or "(no branches)")
+
+
+def cmd_git_add(project: str, files: list[str]):
+    args = ["add"] + (files if files else ["-A"])
+    result = _git(project, args, capture=True)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout).strip())
+    print(f"Staged {'all changes' if not files else ', '.join(files)} in {project}.")
+
+
+def cmd_git_commit(project: str, message_parts: list[str]):
+    if not message_parts:
+        print("usage: panda git commit <project> <message>")
+        sys.exit(1)
+    message = " ".join(message_parts)
+    result = _git(project, ["commit", "-m", message], capture=True)
+    out = ((result.stdout or "") + (result.stderr or "")).strip()
+    if result.returncode != 0:
+        raise RuntimeError(out or f"git commit failed with exit {result.returncode}")
+    print(out)
+
+
+def cmd_git_ecosystem_status():
+    projects = _load_projects()
+    dirty = []
+    clean = []
+    other = []
+    for name in sorted(projects.keys()):
+        try:
+            branch, staged, unstaged, untracked, ahead = _git_status_counts(name)
+            parts = []
+            if staged:
+                parts.append(f"{staged} staged")
+            if unstaged:
+                parts.append(f"{unstaged} unstaged")
+            if untracked:
+                parts.append(f"{untracked} untracked")
+            if ahead:
+                parts.append(f"{ahead} to push")
+            line = f"  {name} [{branch}] - {', '.join(parts) if parts else 'clean'}"
+            (dirty if parts else clean).append(line)
+        except Exception as exc:
+            other.append(f"  {name} - error: {exc}")
+
+    print("\nEcosystem status:\n")
+    if dirty:
+        print("Needs attention:")
+        print("\n".join(dirty))
+        print()
+    if other:
+        print("Errors:")
+        print("\n".join(other))
+        print()
+    if clean:
+        print("Clean:")
+        print("\n".join(clean))
+        print()
+    print(f"{len(dirty)} of {len(projects)} projects have pending changes.")
+
+
+def _parse_limit(args: list[str], default: int = 10) -> int:
+    if not args:
+        return default
+    if len(args) == 1 and args[0].isdigit():
+        return int(args[0])
+    if len(args) == 2 and args[0] == "--limit" and args[1].isdigit():
+        return int(args[1])
+    print("usage: panda git log <project> [--limit N]")
+    sys.exit(1)
+
+
+# == Python runner commands ====================================================
+
+def _clean_python_env() -> dict:
+    blocked = {
+        "VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "PYTHONPATH", "PYTHONHOME",
+        "UV_PROJECT_ENVIRONMENT", "UV_PYTHON", "PYTHONINSPECT",
+    }
+    return {k: v for k, v in os.environ.items() if k not in blocked}
+
+
+def _venv_python(venv_path: str) -> str:
+    base = Path(venv_path).expanduser()
+    candidates = [base / "Scripts" / "python.exe", base / "bin" / "python"]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    raise RuntimeError(f"No Python found in venv: {venv_path}")
+
+
+def _find_project_python(start_path: Path, venv_path: str = "") -> str:
+    if venv_path:
+        return _venv_python(venv_path)
+    current = start_path if start_path.is_dir() else start_path.parent
+    for _ in range(8):
+        for name in ("venv", ".venv"):
+            base = current / name
+            candidates = [base / "Scripts" / "python.exe", base / "bin" / "python"]
+            for candidate in candidates:
+                if candidate.exists():
+                    return str(candidate)
+        parent = current.parent
+        if parent == current:
+            break
+        current = parent
+    return sys.executable
+
+
+def _split_py_args(args: list[str]) -> tuple[list[str], dict[str, str]]:
+    options = {"timeout": "30", "venv": "", "cwd": ""}
+    script_args = []
+    i = 0
+    pass_through = False
+    while i < len(args):
+        item = args[i]
+        if pass_through:
+            script_args.append(item)
+        elif item == "--":
+            pass_through = True
+        elif item in ("--timeout", "--venv", "--cwd"):
+            if i + 1 >= len(args):
+                raise RuntimeError(f"Missing value for {item}")
+            options[item[2:]] = args[i + 1]
+            i += 1
+        else:
+            script_args.append(item)
+        i += 1
+    return script_args, options
+
+
+def _format_python_result(result: subprocess.CompletedProcess, python_used: str) -> str:
+    lines = [f"Python: {python_used}", f"Exit code: {result.returncode}"]
+    stdout = (result.stdout or "").rstrip()
+    stderr = (result.stderr or "").rstrip()
+    if stdout:
+        lines += ["", "-- stdout --", stdout]
+    if stderr:
+        lines += ["", "-- stderr --", stderr]
+    if not stdout and not stderr:
+        lines.append("(no output)")
+    return "\n".join(lines)
+
+
+def _run_python(python: str, args: list[str], cwd: Path, timeout: int):
+    try:
+        result = subprocess.run(
+            [python] + args,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=_clean_python_env(),
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"Python: {python}\nExit code: -1\n\n-- stderr --\nTimeout: exceeded {timeout}s limit.")
+        return
+    print(_format_python_result(result, python))
+
+
+def cmd_py_run(script_path: str, args: list[str]):
+    script_args, options = _split_py_args(args)
+    path = Path(script_path).expanduser()
+    if not path.exists():
+        raise RuntimeError(f"Python script not found: {path}")
+    python = _find_project_python(path, options["venv"])
+    _run_python(python, [str(path)] + script_args, path.parent, int(options["timeout"]))
+
+
+def cmd_py_run_project(project: str, script_path: str, args: list[str]):
+    script_args, options = _split_py_args(args)
+    project_dir = _project_path(project)
+    path = project_dir / script_path
+    if not path.exists():
+        raise RuntimeError(f"Python script not found: {path}")
+    python = _find_project_python(path, options["venv"])
+    _run_python(python, [str(path)] + script_args, path.parent, int(options["timeout"]))
+
+
+def cmd_py_code(code: str, args: list[str]):
+    _, options = _split_py_args(args)
+    cwd_value = options["cwd"]
+    if cwd_value:
+        try:
+            cwd = _project_path(cwd_value)
+        except RuntimeError:
+            cwd = Path(cwd_value).expanduser()
+    else:
+        cwd = Path.home()
+    if not cwd.exists():
+        raise RuntimeError(f"Working directory not found: {cwd}")
+    python = _find_project_python(cwd, options["venv"])
+    _run_python(python, ["-c", code], cwd, int(options["timeout"]))
 
 
 # == VPS commands ==============================================================
@@ -396,6 +865,190 @@ def cmd_vps_deploy(name: str):
         _log("Deploy successful.")
     else:
         _log(f"Deploy failed (exit {code}).")
+
+
+# == Controlled SSH commands ===================================================
+
+def cmd_ssh_ping():
+    out, code = _ssh_capture_audited("ping", VPS_HOST, 'echo "host=$(hostname)" && uptime')
+    print(out)
+    print(f"[exit code: {code}]")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_disk():
+    code = _ssh_run_audited("disk_usage", VPS_HOST, "df -h --output=source,size,used,avail,pcent,target | column -t")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_memory():
+    code = _ssh_run_audited("memory_usage", VPS_HOST, "free -h && echo '---' && ps aux --sort=-%mem | head -10")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_uptime():
+    code = _ssh_run_audited("uptime", VPS_HOST, "uptime && echo '' && w")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_status():
+    cmd_ssh_pm2_status()
+    print()
+    cmd_ssh_disk()
+    print()
+    cmd_ssh_memory()
+
+
+def cmd_ssh_service_status(service: str):
+    if service not in VPS_SYSTEMD_SERVICES:
+        _ssh_audit("service_status", f"BLOCKED: {service}", success=False)
+        raise RuntimeError(f"Service '{service}' is not allowed. Allowed: {VPS_SYSTEMD_SERVICES}")
+    code = _ssh_run_audited("service_status", service, f"sudo -n systemctl status {_ssh_quote(service)} --no-pager -l")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_service_restart(service: str):
+    if service not in VPS_SYSTEMD_SERVICES:
+        _ssh_audit("service_restart", f"BLOCKED: {service}", success=False)
+        raise RuntimeError(f"Service '{service}' is not allowed. Allowed: {VPS_SYSTEMD_SERVICES}")
+    code = _ssh_run_audited("service_restart", service, f"sudo -n systemctl restart {_ssh_quote(service)} && echo '{service} restarted OK'")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_service_logs(service: str, lines: int = 50):
+    if service not in VPS_SYSTEMD_SERVICES:
+        _ssh_audit("service_logs", f"BLOCKED: {service}", success=False)
+        raise RuntimeError(f"Service '{service}' is not allowed. Allowed: {VPS_SYSTEMD_SERVICES}")
+    lines = min(int(lines), 200)
+    code = _ssh_run_audited("service_logs", f"{service} last={lines}", f"sudo -n journalctl -u {_ssh_quote(service)} -n {lines} --no-pager")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_nginx_status():
+    cmd_ssh_service_status("nginx")
+
+
+def cmd_ssh_nginx_restart():
+    cmd_ssh_service_restart("nginx")
+
+
+def cmd_ssh_nginx_logs(lines: int = 50):
+    lines = min(int(lines), 200)
+    code = _ssh_run_audited("nginx_logs", f"last={lines}", f"sudo -n tail -n {lines} /var/log/nginx/error.log")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_pm2_status():
+    code = _ssh_run_audited("pm2_status", VPS_HOST, "pm2 list")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_pm2_restart(name: str):
+    if name not in VPS_PM2_APPS:
+        _ssh_audit("pm2_restart", f"BLOCKED: {name}", success=False)
+        raise RuntimeError(f"PM2 app '{name}' is not allowed. Allowed: {VPS_PM2_APPS}")
+    code = _ssh_run_audited("pm2_restart", name, f"pm2 restart {_ssh_quote(name)} && pm2 list")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_pm2_logs(name: str, lines: int = 50):
+    if name not in VPS_PM2_APPS:
+        _ssh_audit("pm2_logs", f"BLOCKED: {name}", success=False)
+        raise RuntimeError(f"PM2 app '{name}' is not allowed. Allowed: {VPS_PM2_APPS}")
+    lines = min(int(lines), 200)
+    safe_name = _ssh_quote(name)
+    code = _ssh_run_audited(
+        "pm2_logs",
+        f"{name} last={lines}",
+        f"echo '=== OUT ===' && tail -n {lines} ~/.pm2/logs/{safe_name}-out.log 2>/dev/null; "
+        f"echo '=== ERROR ===' && tail -n {lines} ~/.pm2/logs/{safe_name}-error.log 2>/dev/null",
+    )
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_screen_list():
+    code = _ssh_run_audited("screen_list", VPS_HOST, "screen -ls 2>&1 || true")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_screen_logs(name: str):
+    if name not in VPS_SCREENS:
+        _ssh_audit("screen_logs", f"BLOCKED: {name}", success=False)
+        raise RuntimeError(f"Screen '{name}' is not allowed. Allowed: {VPS_SCREENS}")
+    tmp = f"/tmp/panda_screen_{name}.txt"
+    code = _ssh_run_audited("screen_logs", name, f"screen -S {_ssh_quote(name)} -X hardcopy {_ssh_quote(tmp)} && sleep 0.2 && cat {_ssh_quote(tmp)} && rm -f {_ssh_quote(tmp)}")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_git_status(repo_path: str):
+    if repo_path not in VPS_ALLOWED_REPOS:
+        _ssh_audit("git_status", f"BLOCKED: {repo_path}", success=False)
+        raise RuntimeError(f"Repo path '{repo_path}' is not allowed. Allowed: {sorted(VPS_ALLOWED_REPOS)}")
+    code = _ssh_run_audited("git_status", repo_path, f"cd {_ssh_quote(repo_path)} && git status && echo '---' && git log --oneline -5")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_git_pull(repo_path: str):
+    if repo_path not in VPS_ALLOWED_REPOS:
+        _ssh_audit("git_pull", f"BLOCKED: {repo_path}", success=False)
+        raise RuntimeError(f"Repo path '{repo_path}' is not allowed. Allowed: {sorted(VPS_ALLOWED_REPOS)}")
+    code = _ssh_run_audited("git_pull", repo_path, f"cd {_ssh_quote(repo_path)} && git pull 2>&1")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_read_file(remote_path: str, lines: int = 500):
+    lines = min(int(lines), 500)
+    code = _ssh_run_audited("read_file", remote_path, f"head -{lines} {_ssh_quote(remote_path)} 2>&1")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_list_dir(remote_path: str):
+    code = _ssh_run_audited("list_dir", remote_path, f"ls -lah {_ssh_quote(remote_path)} 2>&1")
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_run_alias(alias: str):
+    if alias not in VPS_ALLOWED_COMMANDS:
+        _ssh_audit("run_command", f"BLOCKED unknown alias: {alias!r}", success=False)
+        raise RuntimeError(f"Unknown alias '{alias}'. Available: {sorted(VPS_ALLOWED_COMMANDS.keys())}")
+    command = VPS_ALLOWED_COMMANDS[alias]
+    code = _ssh_run_audited("run_command", f"{alias!r} -> {command!r}", command)
+    sys.exit(code) if code else None
+
+
+def cmd_ssh_audit(lines: int = 30):
+    lines = min(int(lines), 100)
+    if not PANDA_SSH_AUDIT_LOG.exists():
+        print("Audit log is empty.")
+        return
+    entries = PANDA_SSH_AUDIT_LOG.read_text(encoding="utf-8").splitlines()
+    print("\n".join(entries[-lines:]))
+
+
+def cmd_ssh_config():
+    print(json.dumps({
+        "host": VPS_HOST,
+        "port": VPS_PORT,
+        "user": VPS_USER,
+        "key_path": VPS_KEY,
+        "passphrase_set": bool(VPS_KEY_PASS),
+        "allowed_systemd_services": VPS_SYSTEMD_SERVICES,
+        "allowed_pm2_apps": VPS_PM2_APPS,
+        "allowed_screen_sessions": VPS_SCREENS,
+        "allowed_repo_paths": sorted(VPS_ALLOWED_REPOS),
+        "allowed_aliases": sorted(VPS_ALLOWED_COMMANDS.keys()),
+        "audit_log": str(PANDA_SSH_AUDIT_LOG),
+    }, indent=2))
+
+
+def _parse_lines(args: list[str], default: int = 50) -> int:
+    if not args:
+        return default
+    if len(args) == 1 and args[0].isdigit():
+        return int(args[0])
+    if len(args) == 2 and args[0] == "--lines" and args[1].isdigit():
+        return int(args[1])
+    raise RuntimeError("Use [--lines N]")
 
 
 # == Existing commands =========================================================
@@ -662,6 +1315,37 @@ commands:
   llm stop                              stop llama-swap
   llm status                            check LLM health + list loaded models
 
+  projects list                          list projects from gitmanager/projects.json
+  projects show <project>                show registry metadata for a project
+  projects path <project>                print resolved project path
+  projects status                        same as git ecosystem-status
+
+  git ecosystem-status                   Git health summary for all registered projects
+  git status <project>                   git status --short --branch
+  git diff <project> [file]              unstaged diff
+  git diff-staged <project>              staged diff
+  git log <project> [--limit N]          recent commits
+  git branches <project>                 local branches
+  git add <project> [file ...|--all]     stage files or all changes
+  git commit <project> <message>         commit staged changes
+
+  py run <script_path>                  run an absolute/local Python script
+  py run-project <project> <script>     run a Python script inside a project
+  py code <code> [--cwd <project|path>] run inline Python code
+
+
+  ssh ping                              controlled VPS connectivity check
+  ssh status                            pm2 + disk + memory through allowlist
+  ssh config                            show SSH config without secrets
+  ssh audit [--lines N]                 show local audit log
+  ssh nginx <status|restart|logs>       controlled nginx operations
+  ssh service <status|restart|logs>     controlled systemd service operations
+  ssh pm2 <status|logs|restart>         controlled pm2 operations
+  ssh git <status|pull> <repo_path>     controlled remote git operations
+  ssh read-file <remote_path>           read first lines of a remote file
+  ssh list-dir <remote_path>            list a remote directory
+  ssh run-alias <alias>                 run a pre-approved command alias
+
   vps ssh                               open interactive SSH session to VPS
   vps status                            pm2 + screen + disk + memory on VPS
   vps logs <pp|telegramBot>             tail logs for dapp (pp) or bot (telegramBot)
@@ -730,6 +1414,143 @@ def main():
         elif cmd == "bench":
             sub = argv[1] if len(argv) > 1 else ""
             if sub == "run": cmd_bench_run()
+            else: _unknown_sub(cmd, sub)
+
+
+        elif cmd == "projects":
+            sub = argv[1] if len(argv) > 1 else ""
+            if   sub == "list":   cmd_projects_list()
+            elif sub == "show":   cmd_projects_show(_require_project_arg(argv[2:], "usage: panda projects show <project>"))
+            elif sub == "path":   cmd_projects_path(_require_project_arg(argv[2:], "usage: panda projects path <project>"))
+            elif sub == "status": cmd_projects_status()
+            else: _unknown_sub(cmd, sub)
+
+        elif cmd == "git":
+            sub = argv[1] if len(argv) > 1 else ""
+            if sub == "ecosystem-status":
+                cmd_git_ecosystem_status()
+            elif sub == "status":
+                cmd_git_status(_require_project_arg(argv[2:], "usage: panda git status <project>"))
+            elif sub == "diff":
+                project = _require_project_arg(argv[2:], "usage: panda git diff <project> [file]")
+                cmd_git_diff(project, argv[3] if len(argv) > 3 else "")
+            elif sub == "diff-staged":
+                cmd_git_diff_staged(_require_project_arg(argv[2:], "usage: panda git diff-staged <project>"))
+            elif sub == "log":
+                project = _require_project_arg(argv[2:], "usage: panda git log <project> [--limit N]")
+                cmd_git_log(project, _parse_limit(argv[3:]))
+            elif sub == "branches":
+                cmd_git_branches(_require_project_arg(argv[2:], "usage: panda git branches <project>"))
+            elif sub == "add":
+                project = _require_project_arg(argv[2:], "usage: panda git add <project> [file ...]")
+                files = argv[3:]
+                if files == ["--all"]:
+                    files = []
+                cmd_git_add(project, files)
+            elif sub == "commit":
+                project = _require_project_arg(argv[2:], "usage: panda git commit <project> <message>")
+                cmd_git_commit(project, argv[3:])
+            else: _unknown_sub(cmd, sub)
+
+
+        elif cmd == "py":
+            sub = argv[1] if len(argv) > 1 else ""
+            if sub == "run":
+                script = argv[2] if len(argv) > 2 else ""
+                if not script:
+                    print("usage: panda py run <script_path> [--timeout N] [--venv PATH] [-- args]")
+                    sys.exit(1)
+                cmd_py_run(script, argv[3:])
+            elif sub == "run-project":
+                project = argv[2] if len(argv) > 2 else ""
+                script = argv[3] if len(argv) > 3 else ""
+                if not project or not script:
+                    print("usage: panda py run-project <project> <script_path> [--timeout N] [--venv PATH] [-- args]")
+                    sys.exit(1)
+                cmd_py_run_project(project, script, argv[4:])
+            elif sub == "code":
+                code = argv[2] if len(argv) > 2 else ""
+                if not code:
+                    print("usage: panda py code <code> [--cwd <project|path>] [--timeout N] [--venv PATH]")
+                    sys.exit(1)
+                cmd_py_code(code, argv[3:])
+            else: _unknown_sub(cmd, sub)
+
+
+        elif cmd == "ssh":
+            sub = argv[1] if len(argv) > 1 else ""
+            if   sub == "ping":    cmd_ssh_ping()
+            elif sub == "status":  cmd_ssh_status()
+            elif sub == "disk":    cmd_ssh_disk()
+            elif sub == "memory":  cmd_ssh_memory()
+            elif sub == "uptime":  cmd_ssh_uptime()
+            elif sub == "config":  cmd_ssh_config()
+            elif sub == "audit":   cmd_ssh_audit(_parse_lines(argv[2:], default=30))
+            elif sub == "nginx":
+                action = argv[2] if len(argv) > 2 else ""
+                if   action == "status":  cmd_ssh_nginx_status()
+                elif action == "restart": cmd_ssh_nginx_restart()
+                elif action == "logs":    cmd_ssh_nginx_logs(_parse_lines(argv[3:]))
+                else: _unknown_sub("ssh nginx", action)
+            elif sub == "service":
+                action = argv[2] if len(argv) > 2 else ""
+                service = argv[3] if len(argv) > 3 else ""
+                if not service:
+                    print("usage: panda ssh service <status|restart|logs> <service> [--lines N]")
+                    sys.exit(1)
+                if   action == "status":  cmd_ssh_service_status(service)
+                elif action == "restart": cmd_ssh_service_restart(service)
+                elif action == "logs":    cmd_ssh_service_logs(service, _parse_lines(argv[4:]))
+                else: _unknown_sub("ssh service", action)
+            elif sub == "pm2":
+                action = argv[2] if len(argv) > 2 else ""
+                if action == "status":
+                    cmd_ssh_pm2_status()
+                else:
+                    name = argv[3] if len(argv) > 3 else ""
+                    if not name:
+                        print("usage: panda ssh pm2 <logs|restart> <app> [--lines N]")
+                        sys.exit(1)
+                    if   action == "logs":    cmd_ssh_pm2_logs(name, _parse_lines(argv[4:]))
+                    elif action == "restart": cmd_ssh_pm2_restart(name)
+                    else: _unknown_sub("ssh pm2", action)
+            elif sub == "screen":
+                action = argv[2] if len(argv) > 2 else ""
+                if action == "list": cmd_ssh_screen_list()
+                elif action == "logs":
+                    name = argv[3] if len(argv) > 3 else ""
+                    if not name:
+                        print("usage: panda ssh screen logs <name>")
+                        sys.exit(1)
+                    cmd_ssh_screen_logs(name)
+                else: _unknown_sub("ssh screen", action)
+            elif sub == "git":
+                action = argv[2] if len(argv) > 2 else ""
+                repo = argv[3] if len(argv) > 3 else ""
+                if not repo:
+                    print("usage: panda ssh git <status|pull> <allowed_repo_path>")
+                    sys.exit(1)
+                if   action == "status": cmd_ssh_git_status(repo)
+                elif action == "pull":   cmd_ssh_git_pull(repo)
+                else: _unknown_sub("ssh git", action)
+            elif sub == "read-file":
+                path = argv[2] if len(argv) > 2 else ""
+                if not path:
+                    print("usage: panda ssh read-file <remote_path> [--lines N]")
+                    sys.exit(1)
+                cmd_ssh_read_file(path, _parse_lines(argv[3:], default=500))
+            elif sub == "list-dir":
+                path = argv[2] if len(argv) > 2 else ""
+                if not path:
+                    print("usage: panda ssh list-dir <remote_path>")
+                    sys.exit(1)
+                cmd_ssh_list_dir(path)
+            elif sub == "run-alias":
+                alias = argv[2] if len(argv) > 2 else ""
+                if not alias:
+                    print("usage: panda ssh run-alias <alias>")
+                    sys.exit(1)
+                cmd_ssh_run_alias(alias)
             else: _unknown_sub(cmd, sub)
 
         elif cmd == "vps":

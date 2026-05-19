@@ -84,6 +84,94 @@ panda gitmanager        # gitmanager server (port 8000)
 panda conduler          # conduler server (port 7071)
 ```
 
+
+### Project registry
+
+These commands read `workspace_root</gitmanager/projects.json` by default. Override
+with `PROJECTS_JSON` when testing another registry.
+
+```bash
+panda projects list
+panda projects show git-mcp
+panda projects path mcp-ssh
+panda projects status
+```
+
+### Git operations
+
+Git commands resolve project names through the shared registry, so callers do not
+need to pass full paths.
+
+```bash
+panda git ecosystem-status
+panda git status git-mcp
+panda git diff mcp-ssh
+panda git diff-staged git-mcp
+panda git log git-mcp --limit 10
+panda git branches git-mcp
+panda git add git-mcp server.py
+panda git add git-mcp --all
+panda git commit git-mcp "feat: add project commands"
+```
+
+
+### Python runner
+
+Python commands auto-detect the nearest `venv/` or `.venv/` by walking up from
+the script or working directory. Use `--venv` to force a specific environment and
+`--timeout` to cap execution time.
+
+```bash
+panda py run workspace_root</rotman/main.py --timeout 60
+panda py run-project rotman pipeline.py --timeout 120 -- bitcoinfacil --topic "topic"
+panda py code "import sys; print(sys.executable)" --cwd git-mcp
+```
+
+
+## Controlled SSH commands
+
+`panda ssh` is the safer replacement path for `mcp-ssh`. It keeps the same basic
+security shape: configured SSH identity, allowlisted services/apps/repos, command
+aliases instead of arbitrary shell, and a local audit log.
+
+```bash
+panda ssh config
+panda ssh ping
+panda ssh status
+panda ssh audit --lines 50
+panda ssh nginx status
+panda ssh nginx logs --lines 50
+panda ssh pm2 status
+panda ssh pm2 logs pp --lines 50
+panda ssh pm2 restart pp
+panda ssh git status remote_project_path<
+panda ssh git pull remote_project_path<
+panda ssh read-file /etc/nginx/sites-enabled/default --lines 120
+panda ssh list-dir remote_home<
+panda ssh run-alias nginx-configtest
+```
+
+Configuration prefers `PANDA_*` env vars and falls back to the existing
+`MCP_SSH_*` env vars where possible:
+
+```text
+PANDA_VPS_HOST / MCP_SSH_HOST
+PANDA_VPS_PORT / MCP_SSH_PORT
+PANDA_VPS_USER / MCP_SSH_USER
+PANDA_VPS_KEY  / MCP_SSH_KEY_PATH
+ssh_passphrase_env< / ssh_passphrase_env<
+PANDA_SSH_ALLOWED_SERVICES / MCP_SSH_ALLOWED_SERVICES
+PANDA_SSH_ALLOWED_PM2 / MCP_SSH_ALLOWED_PM2
+PANDA_SSH_ALLOWED_SCREENS / MCP_SSH_ALLOWED_SCREENS
+PANDA_SSH_ALLOWED_REPOS / MCP_SSH_ALLOWED_REPOS
+PANDA_SSH_ALLOWED_COMMANDS / MCP_SSH_ALLOWED_COMMANDS
+```
+
+The audit log defaults to `%USERPROFILE%/.mcp-ssh/audit.log` for continuity with
+`mcp-ssh`. If a key passphrase is configured, `panda ssh` uses Paramiko when
+available; otherwise it uses non-interactive OpenSSH and expects the key to be
+usable by `ssh.exe` or loaded in an agent.
+
 ## VPS commands
 
 ```bash
