@@ -45,6 +45,30 @@ panda ssh git status remote_project_path<
 
 For Python execution, prefer `panda py` so venv detection, timeout, stdout, stderr, and exit code formatting stay consistent.
 
+## Context Efficiency
+
+- Read the minimum number of files necessary.
+- Prefer targeted inspection over exploratory scanning.
+- Avoid reading generated files, dist folders, build artifacts, package-lock files, and large logs unless explicitly requested.
+- Summarize findings instead of repeatedly reopening the same files.
+- Batch related inspections before proposing edits.
+
+## Ignore Paths
+
+Unless explicitly requested, avoid:
+
+- node_modules
+- dist
+- build
+- coverage
+- .next
+- out
+- tmp
+- logs
+- cache
+- generated
+- vendor
+
 ## Safety Rules
 
 - Ask before `git push`, `git reset`, `git rebase`, recursive deletion, deploys, and VPS restarts.
