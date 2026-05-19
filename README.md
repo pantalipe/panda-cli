@@ -32,7 +32,7 @@ The Panda ecosystem Codex skill is versioned in this repo at
 The active local copy lives at:
 
 ```text
-workspace_root</.codex/skills/panda-ecosystem/
+<workspace_root>/.codex/skills/panda-ecosystem/
 ```
 
 When updating the skill, edit the versioned copy here first, then sync it into
@@ -102,7 +102,7 @@ panda conduler          # conduler server (port 7071)
 
 ### Project registry
 
-These commands read `workspace_root</gitmanager/projects.json` by default. Override
+These commands read `<workspace_root>/gitmanager/projects.json` by default. Override
 with `PROJECTS_JSON` when testing another registry.
 
 ```bash
@@ -138,7 +138,7 @@ the script or working directory. Use `--venv` to force a specific environment an
 `--timeout` to cap execution time.
 
 ```bash
-panda py run workspace_root</rotman/main.py --timeout 60
+panda py run <workspace_root>/rotman/main.py --timeout 60
 panda py run-project rotman pipeline.py --timeout 120 -- bitcoinfacil --topic "topic"
 panda py code "import sys; print(sys.executable)" --cwd git-mcp
 ```
@@ -160,10 +160,10 @@ panda ssh nginx logs --lines 50
 panda ssh pm2 status
 panda ssh pm2 logs pp --lines 50
 panda ssh pm2 restart pp
-panda ssh git status remote_project_path<
-panda ssh git pull remote_project_path<
+panda ssh git status <remote_project_path>
+panda ssh git pull <remote_project_path>
 panda ssh read-file /etc/nginx/sites-enabled/default --lines 120
-panda ssh list-dir remote_home<
+panda ssh list-dir <remote_home>
 panda ssh run-alias nginx-configtest
 ```
 
@@ -175,7 +175,7 @@ PANDA_VPS_HOST / MCP_SSH_HOST
 PANDA_VPS_PORT / MCP_SSH_PORT
 PANDA_VPS_USER / MCP_SSH_USER
 PANDA_VPS_KEY  / MCP_SSH_KEY_PATH
-ssh_passphrase_env< / ssh_passphrase_env<
+<ssh_passphrase_env>
 PANDA_SSH_ALLOWED_SERVICES / MCP_SSH_ALLOWED_SERVICES
 PANDA_SSH_ALLOWED_PM2 / MCP_SSH_ALLOWED_PM2
 PANDA_SSH_ALLOWED_SCREENS / MCP_SSH_ALLOWED_SCREENS

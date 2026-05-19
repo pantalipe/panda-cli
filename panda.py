@@ -154,11 +154,12 @@ VPS_PM2_APPS = _env_csv("PANDA_SSH_ALLOWED_PM2", "MCP_SSH_ALLOWED_PM2", default=
 VPS_SCREENS = _env_csv("PANDA_SSH_ALLOWED_SCREENS", "MCP_SSH_ALLOWED_SCREENS", default="")
 
 # repo paths allowed for remote git status/pull
-_ALLOWED_REPO_LIST = _env_csv("PANDA_SSH_ALLOWED_REPOS", "MCP_SSH_ALLOWED_REPOS", default="remote_project_path<")
+_ALLOWED_REPO_LIST = _env_csv("PANDA_SSH_ALLOWED_REPOS", "MCP_SSH_ALLOWED_REPOS", default="")
 VPS_ALLOWED_REPOS = set(_ALLOWED_REPO_LIST)
 
 # pm2 app name -> repo path on VPS (git-deployed apps only)
-VPS_PM2_REPOS = {"pp": "remote_project_path<"}
+# Configure via PANDA_SSH_PM2_REPOS env var: "pp=/home/<user>/pp,bot=/home/<user>/bot"
+VPS_PM2_REPOS = {}
 for item in _env_csv("PANDA_SSH_PM2_REPOS", default=""):
     if "=" in item:
         name, repo = item.split("=", 1)
@@ -169,7 +170,7 @@ _CMD_DEFAULTS = {
     "systemctl-disable-nginx": "sudo -n systemctl disable nginx",
     "systemctl-enable-pm2": "sudo -n systemctl enable pm2-panda",
     "pm2-startup": "pm2 startup systemd",
-    "pm2-install-startup": "sudo env PATH=$PATH:/usr/bin /usr/local/lib/node_modules/pm2/bin/pm2 startup systemd -u panda --hp remote_home<",
+    "pm2-install-startup": "sudo env PATH=$PATH:/usr/bin /usr/local/lib/node_modules/pm2/bin/pm2 startup systemd -u <vps_user> --hp /home/<vps_user>",
     "pm2-save": "pm2 save",
     "pm2-resurrect": "pm2 resurrect",
     "nginx-configtest": "sudo -n nginx -t",
