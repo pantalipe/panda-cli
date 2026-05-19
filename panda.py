@@ -607,6 +607,17 @@ def cmd_git_commit(project: str, message_parts: list[str]):
     print(out)
 
 
+def cmd_git_push(project: str, args: list[str]):
+    if len(args) > 2 or any(arg.startswith("-") for arg in args):
+        print("usage: panda git push <project> [remote] [branch]")
+        sys.exit(1)
+    result = _git(project, ["push"] + args, capture=True)
+    out = ((result.stdout or "") + (result.stderr or "")).strip()
+    if result.returncode != 0:
+        raise RuntimeError(out or f"git push failed with exit {result.returncode}")
+    print(out or f"Pushed {project}.")
+
+
 def cmd_git_ecosystem_status():
     projects = _load_projects()
     dirty = []
@@ -1328,6 +1339,7 @@ commands:
   git branches <project>                 local branches
   git add <project> [file ...|--all]     stage files or all changes
   git commit <project> <message>         commit staged changes
+  git push <project> [remote] [branch]   push committed changes
 
   py run <script_path>                  run an absolute/local Python script
   py run-project <project> <script>     run a Python script inside a project
@@ -1450,6 +1462,9 @@ def main():
             elif sub == "commit":
                 project = _require_project_arg(argv[2:], "usage: panda git commit <project> <message>")
                 cmd_git_commit(project, argv[3:])
+            elif sub == "push":
+                project = _require_project_arg(argv[2:], "usage: panda git push <project> [remote] [branch]")
+                cmd_git_push(project, argv[3:])
             else: _unknown_sub(cmd, sub)
 
 

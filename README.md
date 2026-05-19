@@ -127,6 +127,7 @@ panda git branches git-mcp
 panda git add git-mcp server.py
 panda git add git-mcp --all
 panda git commit git-mcp "feat: add project commands"
+panda git push git-mcp
 ```
 
 
