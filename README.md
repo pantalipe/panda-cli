@@ -27,7 +27,7 @@ needed.
 ## Codex skill
 
 The Panda ecosystem Codex skill is versioned in this repo at
-`.codex/skills/panda-ecosystem/`.
+`skills/panda-ecosystem/`.
 
 The active local copy lives at:
 
