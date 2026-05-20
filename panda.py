@@ -140,7 +140,7 @@ VPS_HOST    = os.environ.get("PANDA_VPS_HOST") or os.environ.get("MCP_SSH_HOST",
 VPS_PORT    = os.environ.get("PANDA_VPS_PORT") or os.environ.get("MCP_SSH_PORT", "22")
 VPS_USER    = os.environ.get("PANDA_VPS_USER") or os.environ.get("MCP_SSH_USER", "")
 VPS_KEY     = os.environ.get("PANDA_VPS_KEY") or os.environ.get("MCP_SSH_KEY_PATH", str(Path.home() / ".ssh" / "mcp_ssh_ed25519"))
-VPS_KEY_PASS = os.environ.get("ssh_passphrase_env<") or os.environ.get("ssh_passphrase_env<", "")
+VPS_KEY_PASS = os.environ.get("PANDA_SSH_KEY_PASSPHRASE") or os.environ.get("MCP_SSH_KEY_PASSPHRASE", "")
 
 PANDA_SSH_AUDIT_LOG = Path(os.environ.get("PANDA_SSH_AUDIT_LOG", str(Path.home() / ".mcp-ssh" / "audit.log")))
 
@@ -291,6 +291,82 @@ def _ssh_base() -> list:
     return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "-p", str(VPS_PORT), "-i", VPS_KEY, f"{VPS_USER}@{VPS_HOST}"]
 
 
+def _is_ssh_auth_error(stderr_text: str) -> bool:
+    """Return True if stderr indicates an SSH authentication failure."""
+    markers = ("Permission denied", "publickey", "Authentication failed", "no mutual signature")
+    return any(m in stderr_text for m in markers)
+
+
+def _ssh_agent_unlock() -> bool:
+    """Ensure the key is loaded in ssh-agent.
+
+    Strategy:
+    - If PANDA_SSH_KEY_PASSPHRASE is set: run ssh-add non-interactively via
+      a temp SSH_ASKPASS helper script (works with OpenSSH on Windows).
+    - Otherwise: run ssh-add interactively so the user is prompted once.
+
+    Returns True if the key was successfully loaded.
+    """
+    # 1. Check agent availability
+    check = subprocess.run(["ssh-add", "-l"], capture_output=True, text=True)
+    if check.returncode == 2:
+        print(
+            "[ssh] ssh-agent is not running.\n"
+            "      Start it as Administrator (once per system):\n"
+            "        Set-Service ssh-agent -StartupType Automatic\n"
+            "        Start-Service ssh-agent",
+            file=sys.stderr,
+        )
+        return False
+
+    # 2. Check if key is already loaded (ssh-add -L shows full public key with path comment)
+    pubkeys = subprocess.run(["ssh-add", "-L"], capture_output=True, text=True)
+    key_stem = Path(VPS_KEY).expanduser().stem
+    if pubkeys.returncode == 0 and key_stem in pubkeys.stdout:
+        return True  # Already loaded
+
+    # 3. Add the key
+    key_path = str(Path(VPS_KEY).expanduser())
+    if VPS_KEY_PASS:
+        # Non-interactive: write a temporary askpass helper
+        import tempfile, textwrap
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False, encoding="utf-8"
+        ) as fh:
+            askpass_path = fh.name
+            # Escape backslashes in passphrase for safety
+            safe_pass = VPS_KEY_PASS.replace("\\", "\\\\").replace('"', '\\"')
+            fh.write(textwrap.dedent(f'''\
+                import sys
+                print("{safe_pass}")
+            '''))
+        try:
+            env = {
+                **os.environ,
+                "SSH_ASKPASS": f"{sys.executable} {askpass_path}",
+                "SSH_ASKPASS_REQUIRE": "force",
+                "DISPLAY": "1",  # Required by some OpenSSH builds to enable SSH_ASKPASS
+            }
+            result = subprocess.run(
+                ["ssh-add", key_path],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                print("[ssh] Key added to agent via passphrase from env.", file=sys.stderr)
+                return True
+            print(f"[ssh] ssh-add (non-interactive) failed: {result.stderr.strip()}", file=sys.stderr)
+            return False
+        finally:
+            Path(askpass_path).unlink(missing_ok=True)
+    else:
+        # Interactive: prompt the user once
+        print(f"[ssh] Adding key to agent (you will be prompted for the passphrase): {key_path}", file=sys.stderr)
+        result = subprocess.run(["ssh-add", key_path])
+        return result.returncode == 0
+
+
 def _ssh_paramiko_exec(remote_cmd: str) -> tuple[str, str, int]:
     try:
         import paramiko
@@ -338,8 +414,22 @@ def _ssh_run(remote_cmd: str) -> int:
         if err:
             print(err, file=sys.stderr)
         return code
-    result = subprocess.run(_ssh_base() + [remote_cmd])
-    return result.returncode
+    # First attempt: BatchMode (non-interactive, fast fail on auth error)
+    probe = subprocess.run(_ssh_base() + [remote_cmd], capture_output=True, text=True)
+    if probe.returncode != 0 and _is_ssh_auth_error(probe.stderr):
+        print("[ssh] Auth failed — key not in agent. Attempting ssh-add...", file=sys.stderr)
+        if _ssh_agent_unlock():
+            # Retry with streaming output
+            return subprocess.run(_ssh_base() + [remote_cmd]).returncode
+        # Unlock failed — surface original error
+        print(probe.stderr.strip(), file=sys.stderr)
+        return probe.returncode
+    # Success or non-auth error — forward captured output
+    if probe.stdout:
+        print(probe.stdout, end="")
+    if probe.stderr:
+        print(probe.stderr, end="", file=sys.stderr)
+    return probe.returncode
 
 
 def _ssh_capture(remote_cmd: str) -> tuple[str, int]:
@@ -348,10 +438,11 @@ def _ssh_capture(remote_cmd: str) -> tuple[str, int]:
         out, err, code = _ssh_paramiko_exec(remote_cmd)
         combined = "\n".join(part for part in (out, err) if part).strip()
         return combined, code
-    result = subprocess.run(
-        _ssh_base() + [remote_cmd],
-        capture_output=True, text=True,
-    )
+    result = subprocess.run(_ssh_base() + [remote_cmd], capture_output=True, text=True)
+    if result.returncode != 0 and _is_ssh_auth_error(result.stderr):
+        print("[ssh] Auth failed — key not in agent. Attempting ssh-add...", file=sys.stderr)
+        if _ssh_agent_unlock():
+            result = subprocess.run(_ssh_base() + [remote_cmd], capture_output=True, text=True)
     out = (result.stdout + result.stderr).strip()
     return out, result.returncode
 
