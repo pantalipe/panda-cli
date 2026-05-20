@@ -1,42 +1,25 @@
 ---
 name: panda-ecosystem
-description: Work on Felipe Panta's local multi-repository PandaPoints ecosystem in <workspace_root>. Use when Claude Desktop needs to inspect, modify, test, run, or manage any registered project from gitmanager/projects.json; use desktop-commander MCP for terminal commands, file operations, and process management — or panda-cli for project lookup, Git operations, Python script execution, local services, and controlled VPS operations.
+description: Work on Felipe Panta's local multi-repository PandaPoints ecosystem in <workspace_root>. Use when Claude Desktop needs to inspect, modify, test, run, or manage any registered project from gitmanager/projects.json; always use panda-cli as the primary interface for all ecosystem operations, and use desktop-commander MCP only to access the terminal and invoke panda-cli commands.
 ---
 
 # Panda Ecosystem
 
 Use this skill for work across the local PandaPoints ecosystem.
 
-## Tool Selection: desktop-commander vs panda-cli
+## Tool Roles
 
-When running inside **Claude Desktop**, the `desktop-commander` MCP server is the primary way to interact with the local machine. It exposes terminal access, file read/write, process management, and search — all without needing an external tool wrapper.
+**panda-cli is always the primary interface.** Use it for all ecosystem operations — project lookup, Git, Python execution, SSH, and VPS.
 
-| Need | Tool to use |
-|---|---|
-| Run a shell/PowerShell command | `desktop-commander:execute_command` |
-| Read a file | `desktop-commander:read_file` |
-| Write or create a file | `desktop-commander:write_file` |
-| Edit a file (find/replace) | `desktop-commander:edit_block` |
-| List a directory | `desktop-commander:list_directory` |
-| Search files by pattern | `desktop-commander:start_search` |
-| Run a background process | `desktop-commander:start_process` / `interact_with_process` |
-| Check running processes | `desktop-commander:list_processes` |
-| Kill a process | `desktop-commander:kill_process` |
-| Get server config/allowed dirs | `desktop-commander:get_config` |
+**desktop-commander is the terminal access layer.** Its only role is to invoke panda-cli commands via `start_process`. Do not use desktop-commander tools (read_file, write_file, edit_block, list_directory, etc.) to bypass panda-cli for operations that panda-cli already covers.
 
-Use `desktop-commander` for any task that would normally require a terminal (npm, python, git CLI, panda.py commands, etc.). Only fall back to `panda-cli` if `desktop-commander` is unavailable.
-
-**Example — run a panda command via desktop-commander:**
+**Standard pattern for every operation:**
 ```
-desktop-commander:execute_command
-  command: "python <workspace_root>/panda-cli/panda.py projects list"
+desktop-commander:start_process
+  command: "python <workspace_root>/panda-cli/panda.py <command>"
 ```
 
-**Example — read a project file:**
-```
-desktop-commander:read_file
-  path: "<workspace_root>/gitmanager/projects.json"
-```
+**If an operation is not covered by panda-cli**, stop and ask the user for permission before running any direct terminal command via desktop-commander. Describe exactly what command would be run and why panda-cli cannot handle it.
 
 ## Source of Truth
 
