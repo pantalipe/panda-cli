@@ -1,11 +1,42 @@
 ---
 name: panda-ecosystem
-description: Work on Felipe Panta's local multi-repository PandaPoints ecosystem in <workspace_root>. Use when Codex needs to inspect, modify, test, run, or manage any registered project from gitmanager/projects.json; use panda-cli for project lookup, Git operations, Python script execution, local services, and controlled VPS operations.
+description: Work on Felipe Panta's local multi-repository PandaPoints ecosystem in <workspace_root>. Use when Claude Desktop needs to inspect, modify, test, run, or manage any registered project from gitmanager/projects.json; use desktop-commander MCP for terminal commands, file operations, and process management — or panda-cli for project lookup, Git operations, Python script execution, local services, and controlled VPS operations.
 ---
 
 # Panda Ecosystem
 
 Use this skill for work across the local PandaPoints ecosystem.
+
+## Tool Selection: desktop-commander vs panda-cli
+
+When running inside **Claude Desktop**, the `desktop-commander` MCP server is the primary way to interact with the local machine. It exposes terminal access, file read/write, process management, and search — all without needing an external tool wrapper.
+
+| Need | Tool to use |
+|---|---|
+| Run a shell/PowerShell command | `desktop-commander:execute_command` |
+| Read a file | `desktop-commander:read_file` |
+| Write or create a file | `desktop-commander:write_file` |
+| Edit a file (find/replace) | `desktop-commander:edit_block` |
+| List a directory | `desktop-commander:list_directory` |
+| Search files by pattern | `desktop-commander:start_search` |
+| Run a background process | `desktop-commander:start_process` / `interact_with_process` |
+| Check running processes | `desktop-commander:list_processes` |
+| Kill a process | `desktop-commander:kill_process` |
+| Get server config/allowed dirs | `desktop-commander:get_config` |
+
+Use `desktop-commander` for any task that would normally require a terminal (npm, python, git CLI, panda.py commands, etc.). Only fall back to `panda-cli` if `desktop-commander` is unavailable.
+
+**Example — run a panda command via desktop-commander:**
+```
+desktop-commander:execute_command
+  command: "python <workspace_root>/panda-cli/panda.py projects list"
+```
+
+**Example — read a project file:**
+```
+desktop-commander:read_file
+  path: "<workspace_root>/gitmanager/projects.json"
+```
 
 ## Source of Truth
 
