@@ -1236,6 +1236,10 @@ def cmd_bench_run():
     _run([sys.executable, "bench.py"], P["bench"], "ollama-bench")
 
 
+def cmd_bench_all(delay: int = 15):
+    _run([sys.executable, "bench_all.py", "--delay", str(delay)], P["bench"], "ollama-bench all")
+
+
 def cmd_gitmanager():
     _log("Starting gitmanager server...")
     proc = _launch("gitmanager", [sys.executable, "server.py"], P["gitmanager"])
@@ -1417,7 +1421,8 @@ commands:
   rotman generate <channel> [topic]     run pipeline.py  (blocking)
   rotman queue                          show topic queue  (blocking)
 
-  bench run                             ollama-bench  (blocking)
+  bench run                             ollama-bench (todos os modelos juntos)  (blocking)
+  bench all [delay]                     um modelo por vez, delay seg entre eles (padrão 15)  (blocking)
 
   gitmanager                            gitmanager server  (port 8765)
   conduler                              conduler server    (port 7071)
@@ -1525,7 +1530,10 @@ def main():
 
         elif cmd == "bench":
             sub = argv[1] if len(argv) > 1 else ""
-            if sub == "run": cmd_bench_run()
+            if   sub == "run": cmd_bench_run()
+            elif sub == "all":
+                delay = int(argv[2]) if len(argv) > 2 else 15
+                cmd_bench_all(delay)
             else: _unknown_sub(cmd, sub)
 
 
