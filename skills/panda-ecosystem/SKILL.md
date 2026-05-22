@@ -110,28 +110,86 @@ desktop-commander:start_process
 
 > Tip: on the owner's machine, `panda.bat` at the repo root wraps this call — use `panda <command>` if the wrapper is on PATH.
 
-Core panda-cli commands:
+### Projects
 
 ```powershell
-panda projects list
-panda projects show <project>
-panda projects path <project>
-panda projects status
-panda git ecosystem-status
-panda git status <project>
-panda git diff <project> [file]
-panda git diff-staged <project>
-panda git log <project> --limit 10
-panda git branches <project>
-panda py run <script_path> --timeout 60
-panda py run-project <project> <script_path> --timeout 60
-panda py code "print('ok')" --cwd <project>
-panda ssh config
-panda ssh audit --lines 50
-panda ssh pm2 status
-panda ssh pm2 logs pp --lines 50
-panda ssh nginx status
-panda ssh git status /home/panda/pp
+panda projects list                        # list all registered projects
+panda projects show <project>              # metadata for a project
+panda projects path <project>              # resolve absolute path
+panda projects status                      # same as git ecosystem-status
+```
+
+### Git
+
+```powershell
+panda git ecosystem-status                 # Git health summary for all projects
+panda git status <project>                 # git status --short --branch
+panda git diff <project> [file]            # unstaged diff
+panda git diff-staged <project>            # staged diff
+panda git log <project> [--limit N]        # recent commits
+panda git branches <project>               # local branches
+panda git add <project> [file ...|--all]   # stage specific files or all changes
+panda git commit <project> "<message>"     # commit staged changes
+panda git push <project> [remote] [branch] # push committed changes
+```
+
+**Git workflow order:** `git add` → `git diff-staged` (review) → `git commit` → `git push`
+
+### Python
+
+```powershell
+panda py run <script_path>                        # run a Python script
+panda py run-project <project> <script>           # run script inside project venv
+panda py code "print('ok')" --cwd <project>       # run inline Python code
+```
+
+### LLM (llama-swap)
+
+```powershell
+panda llm start        # start llama-swap on :8080
+panda llm stop         # stop llama-swap
+panda llm status       # health check + list loaded models
+```
+
+### Services
+
+```powershell
+panda dapp dev                    # Next.js dev server (port 3000)
+panda dapp poller                 # price_poller.py --local
+panda dapp backfill               # backfill.py --local (blocking)
+panda rotman server               # rotman web UI
+panda rotman generate <channel>   # run content pipeline (blocking)
+panda gitmanager                  # gitmanager server (port 8765)
+panda conduler                    # conduler server (port 7071)
+panda bench run                   # ollama-bench (blocking)
+panda status                      # table of tracked services + PIDs
+panda stop                        # kill all tracked services
+```
+
+### SSH (controlled VPS operations)
+
+```powershell
+panda ssh ping                              # VPS connectivity check
+panda ssh status                            # pm2 + disk + memory
+panda ssh config                            # show SSH config (no secrets)
+panda ssh audit [--lines N]                 # local audit log
+panda ssh nginx <status|restart|logs>       # nginx operations
+panda ssh pm2 <status|logs|restart>         # pm2 operations
+panda ssh git <status|pull> <repo_path>     # remote git operations
+panda ssh read-file <remote_path>           # read first lines of remote file
+panda ssh list-dir <remote_path>            # list remote directory
+panda ssh run-alias <alias>                 # run pre-approved command alias
+```
+
+### VPS (higher-level shortcuts)
+
+```powershell
+panda vps ssh                               # open interactive SSH session
+panda vps status                            # pm2 + disk + memory overview
+panda vps logs <pp|telegramBot>             # tail logs for dapp or bot
+panda vps restart <pp|telegramBot>          # pm2 restart an app
+panda vps deploy <pp>                       # git pull + pm2 restart
+panda vps send <local_path> <remote_path>   # scp a file to the VPS
 ```
 
 ---
