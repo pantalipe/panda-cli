@@ -1240,6 +1240,13 @@ def cmd_bench_all(delay: int = 15):
     _run([sys.executable, "bench_all.py", "--delay", str(delay)], P["bench"], "ollama-bench all")
 
 
+def cmd_bench_quality(export_judge: bool = False):
+    cmd = [sys.executable, "bench_quality.py"]
+    if export_judge:
+        cmd.append("--export-judge")
+    _run(cmd, P["bench"], "bench quality")
+
+
 def cmd_gitmanager():
     _log("Starting gitmanager server...")
     proc = _launch("gitmanager", [sys.executable, "server.py"], P["gitmanager"])
@@ -1423,6 +1430,8 @@ commands:
 
   bench run                             ollama-bench (todos os modelos juntos)  (blocking)
   bench all [delay]                     um modelo por vez, delay seg entre eles (padrão 15)  (blocking)
+  bench quality                         heurísticas de qualidade no bench mais recente  (blocking)
+  bench quality --export-judge          + exporta judge sheet .md para avaliação manual
 
   gitmanager                            gitmanager server  (port 8765)
   conduler                              conduler server    (port 7071)
@@ -1530,10 +1539,11 @@ def main():
 
         elif cmd == "bench":
             sub = argv[1] if len(argv) > 1 else ""
-            if   sub == "run": cmd_bench_run()
+            if   sub == "run":     cmd_bench_run()
             elif sub == "all":
                 delay = int(argv[2]) if len(argv) > 2 else 15
                 cmd_bench_all(delay)
+            elif sub == "quality": cmd_bench_quality(export_judge="--export-judge" in argv)
             else: _unknown_sub(cmd, sub)
 
 
