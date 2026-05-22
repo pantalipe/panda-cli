@@ -42,6 +42,12 @@ import shlex
 import subprocess
 import sys
 import time
+
+# Ensure stdout/stderr handle Unicode on Windows (cp1252 terminals crash on box-drawing chars, pm2 arrows, etc.)
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import urllib.error
 import urllib.request
 import webbrowser
@@ -410,9 +416,11 @@ def _ssh_run(remote_cmd: str) -> int:
     if VPS_KEY_PASS:
         out, err, code = _ssh_paramiko_exec(remote_cmd)
         if out:
-            print(out)
+            sys.stdout.buffer.write(out.encode("utf-8", errors="replace"))
+            sys.stdout.buffer.write(b"\n")
         if err:
-            print(err, file=sys.stderr)
+            sys.stderr.buffer.write(err.encode("utf-8", errors="replace"))
+            sys.stderr.buffer.write(b"\n")
         return code
     # First attempt: BatchMode (non-interactive, fast fail on auth error)
     probe = subprocess.run(_ssh_base() + [remote_cmd], capture_output=True, text=True)
@@ -426,9 +434,9 @@ def _ssh_run(remote_cmd: str) -> int:
         return probe.returncode
     # Success or non-auth error — forward captured output
     if probe.stdout:
-        print(probe.stdout, end="")
+        sys.stdout.buffer.write(probe.stdout.encode("utf-8", errors="replace"))
     if probe.stderr:
-        print(probe.stderr, end="", file=sys.stderr)
+        sys.stderr.buffer.write(probe.stderr.encode("utf-8", errors="replace"))
     return probe.returncode
 
 
