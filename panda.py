@@ -1236,8 +1236,9 @@ def cmd_bench_run():
     _run([sys.executable, "bench.py"], P["bench"], "ollama-bench")
 
 
-def cmd_bench_all(delay: int = 15):
-    _run([sys.executable, "bench_all.py", "--delay", str(delay)], P["bench"], "ollama-bench all")
+def cmd_bench_all(delay: int = 15, extra_args: list = None):
+    cmd = [sys.executable, "bench_all.py", "--delay", str(delay)] + (extra_args or [])
+    _run(cmd, P["bench"], "ollama-bench all")
 
 
 def cmd_bench_quality(export_judge: bool = False):
@@ -1541,8 +1542,10 @@ def main():
             sub = argv[1] if len(argv) > 1 else ""
             if   sub == "run":     cmd_bench_run()
             elif sub == "all":
-                delay = int(argv[2]) if len(argv) > 2 else 15
-                cmd_bench_all(delay)
+                # argv[2] pode ser delay (int) ou flags extras (--models etc)
+                delay      = int(argv[2]) if len(argv) > 2 and argv[2].isdigit() else 15
+                extra_args = argv[2:] if len(argv) > 2 and not argv[2].isdigit() else argv[3:]
+                cmd_bench_all(delay, extra_args)
             elif sub == "quality": cmd_bench_quality(export_judge="--export-judge" in argv)
             else: _unknown_sub(cmd, sub)
 
