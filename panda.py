@@ -81,12 +81,13 @@ _load_dotenv()
 ROOT = Path(__file__).resolve().parent.parent
 
 P = {
-    "testenv":    ROOT / "pp-testenv",
-    "dapp":       ROOT / "pandapoints-dapp",
-    "rotman":     ROOT / "rotman",
-    "bench":      ROOT / "ollama-bench",
-    "gitmanager": ROOT / "gitmanager",
-    "conduler":   ROOT / "conduler",
+    "testenv":     ROOT / "pp-testenv",
+    "dapp":        ROOT / "pandapoints-dapp",
+    "rotman":      ROOT / "rotman",
+    "bench":       ROOT / "ollama-bench",
+    "gitmanager":  ROOT / "gitmanager",
+    "conduler":    ROOT / "conduler",
+    "job-hunter":  ROOT / "job-hunter",
 }
 
 import shutil as _shutil
@@ -1162,6 +1163,26 @@ def _parse_lines(args: list[str], default: int = 50) -> int:
     raise RuntimeError("Use [--lines N]")
 
 
+# == Job hunter commands =======================================================
+
+def cmd_jobs_run(no_rank: bool = False):
+    """Fetch + optionally rank jobs from Gupy. Saves results to data/jobs_*.json."""
+    args = ["main.py"]
+    if no_rank:
+        args.append("--no-rank")
+    label = "job-hunter run" + (" --no-rank" if no_rank else "")
+    _run([sys.executable] + args, P["job-hunter"], label)
+
+
+def cmd_jobs_tailor(no_rank: bool = False):
+    """Fetch + rank + generate tailored CV/cover letter for the top match."""
+    args = ["main.py", "--tailor"]
+    if no_rank:
+        args.append("--no-rank")
+    label = "job-hunter tailor" + (" --no-rank" if no_rank else "")
+    _run([sys.executable] + args, P["job-hunter"], label)
+
+
 # == Existing commands =========================================================
 
 def cmd_testenv_start():
@@ -1433,6 +1454,9 @@ commands:
   bench all [delay]                     um modelo por vez, delay seg entre eles (padrão 15)  (blocking)
   bench quality                         heurísticas de qualidade no bench mais recente  (blocking)
   bench quality --export-judge          + exporta judge sheet .md para avaliação manual
+
+  jobs run [--no-rank]               fetch vagas Gupy + ranking LLM (salva data/jobs_*.json)
+  jobs tailor [--no-rank]            + gera CV adaptado para o top match
 
   gitmanager                            gitmanager server  (port 8765)
   conduler                              conduler server    (port 7071)
@@ -1718,6 +1742,13 @@ def main():
                     print("usage: panda vps send <local_path> <remote_path>")
                     sys.exit(1)
                 cmd_vps_send(local, remote)
+            else: _unknown_sub(cmd, sub)
+
+        elif cmd == "jobs":
+            sub = argv[1] if len(argv) > 1 else ""
+            no_rank = "--no-rank" in argv
+            if   sub == "run":    cmd_jobs_run(no_rank=no_rank)
+            elif sub == "tailor": cmd_jobs_tailor(no_rank=no_rank)
             else: _unknown_sub(cmd, sub)
 
         elif cmd == "gitmanager": cmd_gitmanager()
