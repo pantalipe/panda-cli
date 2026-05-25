@@ -1174,8 +1174,15 @@ def cmd_jobs_run(no_rank: bool = False):
     _run([sys.executable] + args, P["job-hunter"], label)
 
 
+def cmd_jobs_view(port: int = 8787):
+    """Start the local viewer and open in browser."""
+    script = P["job-hunter"] / "viewer.py"
+    _launch("job-hunter-viewer", [sys.executable, str(script), "--port", str(port)], P["job-hunter"])
+    _wait_http(port, label="job-hunter viewer")
+    _open_browser(f"http://localhost:{port}")
+
+
 def cmd_jobs_tailor(no_rank: bool = False):
-    """Fetch + rank + generate tailored CV/cover letter for the top match."""
     args = ["main.py", "--tailor"]
     if no_rank:
         args.append("--no-rank")
@@ -1457,6 +1464,7 @@ commands:
 
   jobs run [--no-rank]               fetch vagas Gupy + ranking LLM (salva data/jobs_*.json)
   jobs tailor [--no-rank]            + gera CV adaptado para o top match
+  jobs view                          abre o viewer no browser (:8787)
 
   gitmanager                            gitmanager server  (port 8765)
   conduler                              conduler server    (port 7071)
@@ -1749,6 +1757,7 @@ def main():
             no_rank = "--no-rank" in argv
             if   sub == "run":    cmd_jobs_run(no_rank=no_rank)
             elif sub == "tailor": cmd_jobs_tailor(no_rank=no_rank)
+            elif sub == "view":   cmd_jobs_view()
             else: _unknown_sub(cmd, sub)
 
         elif cmd == "gitmanager": cmd_gitmanager()
